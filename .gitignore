@@ -1,0 +1,123 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE / editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Project specific - large generated / cache files
+# Price history caches (very large, regenerated via IB)
+price_cache_*.pkl.gz
+price_cache_*.pkl
+*.pkl.gz
+
+# Raw N-PORT XML downloads (large, can be re-fetched)
+nport_xmls/
+
+# Regeneratable caches (can be kept if you want to share pre-processed data)
+# Uncomment the following if you want to commit the processed holdings:
+# nport_holdings_cache.json
+# nport_series_cache.json
+cusip_to_ticker_cache.json
+isin_to_ticker_cache.json
+
+# Generated output files (rankings, backtests, dashboards)
+russell1000_rank.html
+russell1000_backtest.html
+russell1000_backtest.xlsx
+backtest_dashboard_*.html
+backtest_*.xlsx
+
+# Logs
+fill_tickers.log
+*.log
+
+# IB / lookup artifacts
+ib_recent_lookup_results.json
+
+# Temporary / scratch
+temp/
+tmp/
+*.tmp
+*.bak
+
+# The old Chinese-named model file (intentionally deleted)
+模型.py
+
+# Centralized cache directory (all price + NPORT + ticker caches)
+cache/
+# Explicitly allow committing the core holdings data if desired (uncomment next line)
+# !cache/nport_holdings_cache.json
+
+# Raw N-PORT XML downloads (large, regeneratable)
+nport_xmls/
