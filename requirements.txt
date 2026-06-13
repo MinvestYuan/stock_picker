@@ -1,4 +1,4 @@
-# Core dependencies for QuantGT stock_picker
+# Dependencies for Russell 1000 NPORT backtest report
 pandas>=2.0.0
 numpy>=1.24.0
 ib_insync>=0.9.86

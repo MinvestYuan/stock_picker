@@ -58,12 +58,12 @@ def get_cache_filename(benchmark: str, duration: str = DEFAULT_DURATION) -> Path
     return canonical
 
 
-def _get_cache_stats(price_map: Dict[str, pd.Series]) -> dict:
+def _get_cache_stats(price_map: Dict[str, pd.DataFrame]) -> dict:
     """计算缓存数据的统计信息"""
     if not price_map:
         return {}
-    min_date = min((s.index.min() for s in price_map.values() if not s.empty), default=None)
-    max_date = max((s.index.max() for s in price_map.values() if not s.empty), default=None)
+    min_date = min((df.index.min() for df in price_map.values() if not df.empty), default=None)
+    max_date = max((df.index.max() for df in price_map.values() if not df.empty), default=None)
     return {
         "count": len(price_map),
         "min_date": min_date,
@@ -129,17 +129,23 @@ def load_price_cache(cache_file: Path) -> Dict[str, pd.Series] | None:
             cols = {c.lower(): c for c in df.columns}
             ticker_col = cols.get("ticker", "ticker")
             date_col = cols.get("date", cols.get("index", "date"))
-            close_col = cols.get("close", "close")
 
-            price_map: Dict[str, pd.Series] = {}
+            price_map: Dict[str, pd.DataFrame] = {}
             for ticker, g in df.groupby(ticker_col):
-                s = pd.Series(
-                    pd.to_numeric(g[close_col], errors="coerce").values,
-                    index=pd.to_datetime(g[date_col]),
-                    name=str(ticker)
-                ).dropna().sort_index()
-                if not s.empty:
-                    price_map[str(ticker)] = s
+                g = g.set_index(pd.to_datetime(g[date_col])).sort_index()
+                if "open" in g.columns and "high" in g.columns:
+                    ohlc = g[["open", "high", "low", "close"]].apply(pd.to_numeric, errors="coerce").dropna()
+                else:
+                    # old cache only had close
+                    close = pd.to_numeric(g[cols.get("close", "close")], errors="coerce")
+                    ohlc = pd.DataFrame({
+                        "open": close,
+                        "high": close,
+                        "low": close,
+                        "close": close
+                    }, index=g.index).dropna()
+                if not ohlc.empty:
+                    price_map[str(ticker)] = ohlc
             stats = _get_cache_stats(price_map)
             info = _format_cache_info(stats, cache_file)
             print(f"[info] 已从 Parquet 缓存加载价格数据: {cache_file.name} ({info})", file=sys.stderr)
@@ -207,14 +213,12 @@ def save_price_cache(price_map: Dict[str, pd.Series], cache_file: Path):
         if target_is_parquet:
             # 转为长表格式（极适合 Parquet 列式存储 + 未来扩展 OHLCV）
             rows = []
-            for t, s in price_map.items():
-                if s is None or s.empty:
+            for t, df in price_map.items():
+                if df is None or df.empty:
                     continue
-                tmp = s.to_frame("close").reset_index()
-                # 统一列名
-                tmp.columns = ["date", "close"]
+                tmp = df.reset_index()
                 tmp["ticker"] = t
-                rows.append(tmp[["ticker", "date", "close"]])
+                rows.append(tmp[["ticker", "date", "open", "high", "low", "close"]])
 
             if not rows:
                 return
@@ -301,18 +305,18 @@ def _fetch_bars(ib: IB, ticker: str, end_date_str: str, duration_str: str) -> li
     return bars
 
 
-def _bars_to_series(bars: list, ticker: str) -> pd.Series | None:
+def _bars_to_series(bars: list, ticker: str) -> pd.DataFrame | None:
     if not bars:
         return None
     df = util.df(bars)
     if df.empty:
         return None
-    series = pd.Series(
-        df["close"].astype(float).values,
-        index=pd.to_datetime(df["date"]),
-        name=ticker
-    )
-    return series.sort_index()
+    df = df[["date", "open", "high", "low", "close"]].copy()
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date").sort_index()
+    df.columns = ["open", "high", "low", "close"]
+    df = df.astype(float)
+    return df
 
 
 def _get_fetch_info(
@@ -621,8 +625,8 @@ def connect_ib(host: str, port: int, client_id: int) -> IB:
     return ib
 
 
-def prepare_feature_frame(price: pd.Series, benchmark: pd.Series) -> pd.DataFrame:
-    common = price.to_frame("close").join(benchmark.to_frame("benchmark"), how="inner")
+def prepare_feature_frame(ohlc: pd.DataFrame, benchmark: pd.Series) -> pd.DataFrame:
+    common = ohlc[["close"]].join(benchmark.to_frame("benchmark"), how="inner")
     if common.empty:
         return common
     common["ema50"] = common["close"].ewm(span=50, adjust=False).mean()
@@ -653,12 +657,13 @@ def prepare_feature_frame(price: pd.Series, benchmark: pd.Series) -> pd.DataFram
 def prepare_all_features(price_map: Dict[str, pd.Series], benchmark_ticker: str) -> Dict[str, pd.DataFrame]:
     if benchmark_ticker not in price_map:
         raise ValueError(f"benchmark {benchmark_ticker} was not downloaded")
-    benchmark = price_map[benchmark_ticker]
+    benchmark_df = price_map[benchmark_ticker]
+    benchmark = benchmark_df["close"] if isinstance(benchmark_df, pd.DataFrame) else benchmark_df
     features: Dict[str, pd.DataFrame] = {}
-    for ticker, series in price_map.items():
+    for ticker, ohlc in price_map.items():
         if ticker == benchmark_ticker:
             continue
-        features[ticker] = prepare_feature_frame(series, benchmark)
+        features[ticker] = prepare_feature_frame(ohlc, benchmark)
     return features
 
 
