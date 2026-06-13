@@ -38,7 +38,7 @@ RUSSELL_BACKTEST_HTML = Path("russell1000_backtest.html")
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="stock_picker",
-        description="QuantGT — Russell 1000 选股与回测工具\n\n"
+        description="Russell 1000 NPORT 月度回测工具\n\n"
                     "常用命令:\n"
                     "  backtest  基于历史 NPORT 持仓的月度回测 + 单一 HTML 报告（含表格、图表、多 benchmark 对比）\n"
                     "  resolve   补全持仓 ticker（已移除 OpenFIGI，依赖 IB + 手动覆盖 + 失败缓存）"
@@ -186,10 +186,10 @@ def cmd_russell_backtest(args) -> int:
         df_summary = _add_benchmark_returns(df_summary, price_map, bm, col_prefix=bm.lower())
 
     # 7. 生成 HTML 报告（统一为单一 HTML 文件，不再生成 Excel）
-    output_path = args.output or Path("russell1000_backtest.html")
+    output_path = args.output or Path("index.html")
     output_path = output_path.with_suffix(".html") if output_path.suffix.lower() != ".html" else output_path
-    generate_backtest_html(df_summary, df_detail, output_path, benchmark=args.benchmark, extra_benchmarks=extra_benchmarks)
-    print(f"[info] 回测 HTML 已生成 → {output_path}", file=sys.stderr)
+    generate_backtest_html(df_summary, df_detail, output_path, benchmark=args.benchmark, extra_benchmarks=extra_benchmarks, price_map=price_map)
+    print(f"[info] HTML 已生成 → {output_path}", file=sys.stderr)
     return 0
 
 
@@ -202,15 +202,15 @@ def _add_benchmark_returns(df_summary: pd.DataFrame, price_map: dict, benchmark_
         df_summary[f"{prefix}_cumulative"] = 0.0
         return df_summary
 
-    b_series = price_map[benchmark_ticker]
+    b_df = price_map[benchmark_ticker]
     benchmark_rets = []
     missing_dates = 0
     for _, row in df_summary.iterrows():
         buy = pd.to_datetime(row["buy_date"])
         sell = pd.to_datetime(row["sell_date"])
         try:
-            buy_price = float(b_series.loc[buy])
-            sell_price = float(b_series.loc[sell])
+            buy_price = float(b_df.loc[buy, "close"])
+            sell_price = float(b_df.loc[sell, "close"])
             ret = (sell_price / buy_price) - 1.0
         except KeyError:
             ret = 0.0
@@ -225,12 +225,10 @@ def _add_benchmark_returns(df_summary: pd.DataFrame, price_map: dict, benchmark_
     return df_summary
 
 
-def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, output_path: Path, benchmark: str = "SPY", extra_benchmarks: list[str] | None = None):
-    """生成专业回测 HTML 仪表盘，匹配 quantgt.io/performance 风格的现代展示效果。
-    包含：KPI卡片、权益曲线、回撤、月度/年度回报、持仓表格、详细指标等。
+def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, output_path: Path, benchmark: str = "SPY", extra_benchmarks: list[str] | None = None, price_map: Dict[str, pd.DataFrame] | None = None):
+    """生成专业回测 HTML 仪表盘。
+    包含：KPI卡片、权益曲线、回撤分布、月度回报、持仓表格、详细指标等。
     """
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
     import json
     from collections import defaultdict
 
@@ -338,88 +336,96 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
 
     # (Equity curve now rendered via TradingView lightweight-charts below; no plotly fig for it)
 
-    # 2. 回撤 (Drawdown) - 正确计算基于权益曲线
+    # Prepare TV data for drawdown (reuse equity calc)
     equity = 1 + df_summary["cumulative_return"]
     peak_equity = equity.cummax()
     drawdown = (equity - peak_equity) / peak_equity
-    fig_dd = go.Figure()
-    fig_dd.add_trace(go.Scatter(
-        x=df_summary["month"], y=drawdown,
-        mode="lines", name="策略回撤", fill="tozeroy",
-        line_color="#ef4444", fillcolor="rgba(239,68,68,0.3)"
-    ))
+    tv_drawdown_series = {}
+    tv_drawdown_series["策略"] = [
+        {"time": f"{row['month']}-01", "value": round(float(d), 6)}
+        for (_, row), d in zip(df_summary.iterrows(), drawdown)
+    ]
     for bm in [benchmark] + extra_benchmarks:
         col = f"{bm.lower()}_cumulative"
         if col in df_summary.columns:
             bm_equity = 1 + df_summary[col]
             bm_peak = bm_equity.cummax()
             bm_dd = (bm_equity - bm_peak) / bm_peak
-            fig_dd.add_trace(go.Scatter(
-                x=df_summary["month"], y=bm_dd,
-                mode="lines", name=f"{bm}回撤",
-                line=dict(color=colors_map.get(bm, "#6b7280"), width=1.5)
-            ))
-    fig_dd.update_layout(
-        title="回撤 (Underwater / Drawdown)",
-        height=320,
-        template="plotly_white",
-        hovermode="x unified",
-        legend=dict(orientation="h", y=1.02),
-        yaxis_tickformat=".0%",
-        margin=dict(t=40, b=20),
-    )
+            tv_drawdown_series[bm] = [
+                {"time": f"{row['month']}-01", "value": round(float(d), 6)}
+                for (_, row), d in zip(df_summary.iterrows(), bm_dd)
+            ]
 
-    # 3. 月度收益柱状图
-    bar_colors = ["#22c55e" if r > 0 else "#ef4444" for r in df_summary["monthly_return"]]
-    fig_monthly = go.Figure()
-    fig_monthly.add_trace(go.Bar(
-        x=df_summary["month"], y=df_summary["monthly_return"],
-        marker_color=bar_colors,
-        name="策略月度回报",
-        hovertemplate="%{x}<br>%{y:.2%}<extra></extra>"
-    ))
-    fig_monthly.update_layout(
-        title="月度回报分布 (Monthly Returns)",
-        height=320,
-        template="plotly_white",
-        yaxis_tickformat=".0%",
-        margin=dict(t=40, b=20),
-    )
+    # Prepare TV data for monthly returns (histogram)
+    tv_monthly_data = [
+        {"time": f"{row['month']}-01", "value": round(float(row['monthly_return']), 6)}
+        for _, row in df_summary.iterrows()
+    ]
 
-    # 4. 年度回报
-    df_summary = df_summary.copy()
-    df_summary['year'] = pd.to_datetime(df_summary['month']).dt.year.astype(str)
-    annual = df_summary.groupby('year')['monthly_return'].apply(lambda x: (1 + x).prod() - 1).reset_index(name='ret')
-    annual_colors = ["#22c55e" if r > 0 else "#ef4444" for r in annual['ret']]
-    fig_annual = go.Figure()
-    fig_annual.add_trace(go.Bar(
-        x=annual['year'], y=annual['ret'],
-        marker_color=annual_colors,
-        name="年度回报",
-        hovertemplate="%{x}<br>%{y:.1%}<extra></extra>"
-    ))
-    fig_annual.update_layout(
-        title="年度回报 (Annual Returns)",
-        height=300,
-        template="plotly_white",
-        yaxis_tickformat=".0%",
-        margin=dict(t=40, b=20),
-    )
+    # Prepare TV data for drawdown distribution histogram (frequency of DD levels)
+    # Only consider periods in drawdown (dd < 0), bin the values
+    dd_negative = [float(d) for d in drawdown if d < 0]
+    tv_dd_dist_data = []
+    if dd_negative:
+        min_d = min(dd_negative)
+        # bins e.g. from 0 to min_d in steps of 5%
+        bin_edges = np.arange(0, min_d - 0.001, -0.05)[::-1]
+        if len(bin_edges) < 3:
+            bin_edges = np.linspace(0, min_d, 6)
+        counts, edges = np.histogram(dd_negative, bins=bin_edges)
+        bin_centers = (edges[:-1] + edges[1:]) / 2
+        tv_dd_dist_data = [
+            {"time": round(c * 10000) + 100000, "value": int(cnt)}
+            for c, cnt in zip(bin_centers, counts)
+        ]
+
+    # Latest month top 5 stocks MTD yield trend data (for browser live update)
+    latest_month = df_summary["month"].iloc[-1]
+    latest_details = df_detail[df_detail["month"] == latest_month]
+    top5_tickers = latest_details["ticker"].head(5).tolist()
+    latest_row = df_summary[df_summary["month"] == latest_month].iloc[0]
+    buy_date = pd.to_datetime(latest_row["buy_date"])
+    sell_date = pd.to_datetime(latest_row["sell_date"])
+    latest_k_metadata = {
+        "tickers": top5_tickers,
+        "startDate": buy_date.strftime("%Y-%m-%d"),
+        "firstCloses": {}
+    }
+    latest_k_fallback = {}
+    mtd_returns = {}
+    for t in top5_tickers:
+        if price_map and t in price_map:
+            ohlc = price_map[t]
+            try:
+                month_df = ohlc.loc[buy_date.strftime("%Y-%m-%d"): sell_date.strftime("%Y-%m-%d")]
+                if len(month_df) > 0:
+                    first = float(month_df["close"].iloc[0])
+                    latest_k_metadata["firstCloses"][t] = first
+                    latest_k_fallback[t] = [
+                        {"time": d.strftime("%Y-%m-%d"), "value": float(row["close"] / first - 1)}
+                        for d, row in month_df.iterrows()
+                    ]
+                    last = float(month_df["close"].iloc[-1])
+                    mtd = (last / first - 1) if first != 0 else 0
+                    mtd_returns[t] = mtd
+            except Exception:
+                pass
+
+    portfolio_mtd = sum(mtd_returns.values()) / len(mtd_returns) if mtd_returns else 0
 
     # === KPI 卡片数据 ===
     kpis = [
-        ("累计回报", fmt_pct(strategy_metrics.get('total_return', 0)), "策略总收益"),
-        ("年化收益 (CAGR)", fmt_pct(strategy_metrics.get('cagr', 0)), "复合年增长率"),
-        ("2026 YTD 今年收益", fmt_pct(ytd_2026), "2026年1-6月累计回报"),
-        ("夏普比率", fmt_num(strategy_metrics.get('sharpe', 0)), "风险调整后收益"),
-        ("最大回撤", fmt_pct(strategy_metrics.get('max_drawdown', 0)), "最大亏损幅度"),
-        ("胜率", f"{strategy_metrics.get('win_rate', 0)*100:.0f}%", "盈利月份占比"),
-        ("年化波动率", fmt_pct(strategy_metrics.get('volatility', 0)), "收益稳定性"),
+        ("2026 YTD", fmt_pct(ytd_2026), ""),
+        ("累计回报", fmt_pct(strategy_metrics.get('total_return', 0)), ""),
+        ("年化收益", fmt_pct(strategy_metrics.get('cagr', 0)), ""),
+        ("最大回撤", fmt_pct(strategy_metrics.get('max_drawdown', 0)), ""),
+        ("夏普比率", f"{strategy_metrics.get('sharpe', 0):.2f}", ""),
+        ("胜率", f"{strategy_metrics.get('win_rate', 0)*100:.0f}%", ""),
     ]
 
     # Use monthly_data prepared above for cards and filtering
 
-    # 合并写入专业 HTML (使用 Tailwind CDN 实现现代仪表盘效果，类似 quantgt.io/performance)
+    # 合并写入专业 HTML (Tailwind + lightweight-charts 现代仪表盘)
     tailwind = "https://cdn.tailwindcss.com"
     tv_charts = "https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"
     with open(output_path, "w", encoding="utf-8") as f:
@@ -428,135 +434,124 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Russell 1000 NPORT 回测报告 | QuantGT</title>
+    <title>Minvest</title>
     <script src="{tailwind}"></script>
     <script src="{tv_charts}"></script>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;family=Space+Grotesk:wght@500;600&amp;display=swap');
-        body {{ font-family: 'Inter', system_ui, sans-serif; }}
-        .font-display {{ font-family: 'Space Grotesk', 'Inter', sans-serif; }}
-        .kpi-card {{ transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1); }}
-        .kpi-card:hover {{ transform: translateY(-2px); }}
-        .metric-value {{ font-feature-settings: "ss02"; }}
-        .plot-container {{ border-radius: 12px; box-shadow: 0 10px 15px -3px rgb(0 0 0 / 0.05), 0 4px 6px -4px rgb(0 0 0 / 0.05); }}
-        .section-title {{ font-size: 1.1rem; letter-spacing: -.025em; }}
-        table {{ border-collapse: separate; border-spacing: 0; }}
-        th, td {{ border-bottom: 1px solid #e5e7eb; }}
-        .month-card {{ font-size: 0.875rem; line-height: 1.25rem; }} /* larger base for cards */
-        /* hide all cards initially; JS filterByYear() + initializeAll() will reveal only the default year (2026) */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;display=swap');
+        body {{ font-family: 'Inter', ui-sans-serif, system-ui, sans-serif; background: #fafafa; }}
+        .font-display {{ font-family: 'Inter', system-ui, sans-serif; font-weight: 600; letter-spacing: -.025em; }}
+        .kpi-card {{ transition: all 0.1s ease; }}
+        .kpi-card:hover {{ box-shadow: 0 1px 3px rgb(0 0 0 / 0.08); transform: translateY(-1px); }}
+        .plot-container {{ border-radius: 8px; border: 1px solid #e5e7eb; background: white; box-sizing: border-box; }}
+        .section-title {{ font-size: 0.875rem; font-weight: 600; color: #171717; letter-spacing: -.01em; }}
+        table {{ border-collapse: separate; border-spacing: 0; font-size: 0.8125rem; }}
+        th, td {{ border-bottom: 1px solid #f4f4f5; padding-top: 0.375rem; padding-bottom: 0.375rem; }}
+        th {{ color: #71717a; font-weight: 500; text-transform: uppercase; font-size: 0.6875rem; letter-spacing: .02em; }}
+        .month-card {{ font-size: 0.8125rem; line-height: 1.2; border: 1px solid #e5e7eb; background: white; }}
         #monthly-cards .month-card {{ display: none; }}
+        .num {{ font-variant-numeric: tabular-nums; }}
+        .card {{ background: white; border: 1px solid #e5e7eb; border-radius: 6px; }}
     </style>
 </head>
-<body class="bg-zinc-50 text-zinc-900">
-    <div class="max-w-[1280px] mx-auto px-6 py-8">
-        <!-- Header -->
-        <div class="flex items-end justify-between mb-8">
-            <div>
-                <div class="flex items-center gap-x-3">
-                    <div class="w-9 h-9 bg-emerald-600 rounded-2xl flex items-center justify-center text-white font-bold text-xl tracking-tighter">Q</div>
-                    <div>
-                        <h1 class="font-display text-3xl font-semibold tracking-tighter">Russell 1000 NPORT 持仓策略</h1>
-                        <p class="text-emerald-600 font-medium text-sm">月度再平衡回测报告</p>
-                    </div>
-                </div>
-            </div>
-            <div class="text-right">
-                <div class="inline-flex items-center gap-x-2 bg-white px-3.5 py-1.5 rounded-3xl border border-zinc-200 text-sm">
-                    <div class="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div>
-                    <span class="font-medium text-zinc-600">2020-01 ~ 2026-06</span>
-                    <span class="text-zinc-400">·</span>
-                    <span class="font-semibold">{months} 个月</span>
-                    <span class="text-emerald-600 font-semibold ml-2">2026 YTD: {fmt_pct(ytd_2026)}</span>
-                </div>
-                <div class="text-sm text-zinc-500 mt-1.5">数据截至 {pd.to_datetime(df_summary['month'].iloc[-1]).strftime('%Y-%m')}</div>
-            </div>
+<body class="bg-[#fafafa] text-[#111] antialiased">
+    <div class="max-w-[1080px] mx-auto px-8 pt-10 pb-16">
+        <!-- Claude-inspired clean header -->
+        <div class="mb-6">
+            <h1 class="font-display text-[28px] font-semibold tracking-[-0.03em]">Minvest</h1>
+            <p class="text-[#666] mt-1 text-[13px]">2020-01 至 2026-06</p>
         </div>
 
         <!-- KPI Cards -->
-        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-8">
+        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-3 gap-4 mb-6">
 """)
 
         # KPI cards
         for label, value, desc in kpis:
-            color = "emerald" if "+" in value or (label in ["夏普比率"] and float(value) > 1) or (label == "胜率" and int(value.replace('%','')) > 55) else "rose" if "-" in value or "最大回撤" in label else "zinc"
+            # Positive numbers (returns, sharpe, win rate) → emerald green; negative (e.g. drawdown, losses) → rose red
+            text_color = "text-rose-600" if value.startswith("-") else "text-emerald-600"
             f.write(f"""
-            <div class="kpi-card bg-white border border-zinc-200 rounded-3xl p-4 shadow-sm">
-                <div class="text-sm font-medium text-zinc-500 tracking-wide">{label}</div>
-                <div class="mt-1.5 text-3xl font-semibold tabular-nums metric-value text-{color}-600">{value}</div>
-                <div class="text-xs text-zinc-400 mt-0.5">{desc}</div>
+            <div class="kpi-card bg-white border border-[#e5e7eb] rounded-xl p-4">
+                <div class="text-[10px] font-medium text-[#666] tracking-[0.5px]">{label}</div>
+                <div class="mt-1.5 text-[28px] font-semibold tabular-nums tracking-tighter {text_color} leading-none">{value}</div>
             </div>
 """)
 
         f.write("""
         </div>
 
-        <!-- Main Equity Curve (TradingView lightweight-charts) -->
-        <div class="mb-6">
-            <div class="flex items-center justify-between mb-3 px-1">
-                <div class="section-title font-semibold">累计权益曲线</div>
-                <div class="text-sm text-zinc-500">策略 vs 多基准（TradingView）</div>
+""")
+
+        # MTD section with proper python f-interp for the initial portfolio_mtd value (overridden by live JS)
+        mtd_val = portfolio_mtd * 100
+        mtd_color = "text-emerald-600" if mtd_val >= 0 else "text-rose-600"
+        f.write(f"""
+        <!-- 本月收益率 (MTD 走势 + 实时组合值) -->
+        <div class="mb-4">
+            <div class="flex items-center justify-between mb-3">
+                <div class="section-title">本月收益率</div>
+                <div id="mtd-live" class="text-sm font-medium text-right tabular-nums">
+                    <span class="{mtd_color}">{mtd_val:.1f}%</span> <span class="text-[9px] text-[#888]">(实时)</span>
+                </div>
             </div>
-            <div class="plot-container bg-white p-2 border border-zinc-100 rounded-3xl shadow-sm">
-                <div id="tv-equity-chart" style="width: 100%; height: 420px;"></div>
+            <div class="plot-container p-3">
+                <div id="tv-latest-kchart" style="width: 100%; height: 260px;"></div>
             </div>
         </div>
 
-        <!-- ensure plotly for other charts (dd/monthly) -->
-        <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+        <!-- Main Equity Curve -->
+        <div class="mb-4">
+            <div class="flex items-baseline justify-between mb-3">
+                <div class="section-title">累计权益曲线</div>
+            </div>
+            <div class="plot-container p-3" style="height: 380px;">
+                <div id="tv-equity-chart" style="width: 100%; height: 100%;"></div>
+            </div>
+        </div>
 
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-            <!-- Drawdown -->
+        <!-- Risk charts - clean side-by-side like Claude interfaces -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-4">
             <div>
-                <div class="flex items-center justify-between mb-3 px-1">
-                    <div class="section-title font-semibold">最大回撤</div>
-                </div>
-                <div class="plot-container bg-white p-2 border border-zinc-100 rounded-3xl shadow-sm">
-""")
-        f.write(fig_dd.to_html(full_html=False, include_plotlyjs=False))
-        f.write("""
+                <div class="section-title mb-2">最大回撤</div>
+                <div class="plot-container p-3" style="height: 240px;">
+                    <div id="tv-drawdown-chart" style="width: 100%; height: 100%;"></div>
                 </div>
             </div>
-
-            <!-- Monthly Returns -->
             <div>
-                <div class="flex items-center justify-between mb-3 px-1">
-                    <div class="section-title font-semibold">月度回报分布</div>
-                </div>
-                <div class="plot-container bg-white p-2 border border-zinc-100 rounded-3xl shadow-sm">
-""")
-        f.write(fig_monthly.to_html(full_html=False, include_plotlyjs=False))
-        f.write("""
+                <div class="section-title mb-2">回撤分布</div>
+                <div class="plot-container p-3" style="height: 240px;">
+                    <div id="tv-dd-dist-chart" style="width: 100%; height: 100%;"></div>
                 </div>
             </div>
         </div>
 
-        <!-- Annual + Monthly Holdings with dropdown and cards -->
-        <div class="mb-8">
+        <!-- Monthly Returns -->
+        <div class="mb-4">
+            <div class="section-title mb-3">月度回报分布</div>
+            <div class="plot-container p-3" style="height: 240px;">
+                <div id="tv-monthly-chart" style="width: 100%; height: 100%;"></div>
+            </div>
+        </div>
+
+        <!-- Holdings -->
+        <div class="pt-2 mb-4">
             <div class="flex items-center justify-between mb-3 px-1">
-                <div class="section-title font-semibold">年度 & 月度持仓</div>
+                <div class="section-title">年度 & 月度持仓 (Minvest)</div>
             </div>
 
             <!-- Year Dropdown for Annual + Year Return -->
-            <div class="mb-4 flex items-center gap-4">
-                <div>
-                    <label class="text-base font-medium text-zinc-600 mr-2">选择年份查看年度表现和该年月度持仓:</label>
-                    <select id="year-select" class="border border-zinc-300 rounded-lg px-3 py-1 text-sm bg-white" onchange="filterByYear()">
+            <div class="mb-5 flex items-center gap-3">
+                <label class="text-sm font-medium text-[#555]">年份</label>
+                <select id="year-select" class="border border-[#e5e7eb] rounded-md px-3 py-1 text-sm bg-white focus:outline-none focus:border-[#d4d4d8]" onchange="filterByYear()">
 """)
         for y in years:
             sel = ' selected' if y == '2026' else ''
             f.write(f'                        <option value="{y}"{sel}>{y}</option>\n')
         f.write("""
                     </select>
-                </div>
-                <div id="year-return-display" class="text-sm font-semibold text-emerald-600 min-w-[120px]"></div>
+                <div id="year-return-display" class="text-sm font-medium text-emerald-600 ml-2 min-w-[100px]"></div>
             </div>
 
-            <!-- Annual summary (simple, can be extended) -->
-            <div id="annual-summary" class="mb-4 text-sm text-zinc-600">
-                选择年份以查看该年度详情（图表为整体年度回报）。
-            </div>
-
-            <!-- Monthly cards grid, filterable by year -->
             <div id="monthly-cards" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
 """)
         for m in monthly_data:
@@ -564,32 +559,29 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
             ret_class = "bg-emerald-100 text-emerald-700" if ret > 0 else "bg-rose-100 text-rose-700"
             ret_str = f"{ret*100:+.2f}%"
             month_details = details_by_month.get(m['month'], [])
-            # Build table for this month's holdings (one ticker per row, columns: 标的, 买入价, 卖出价, 回报, 分数)
+            # Build table for this month's holdings (one ticker per row, columns: 标的, 买入价, 卖出价, 回报)
             if month_details:
                 table_rows = ''
                 for d in month_details:
                     t_ret = d['monthly_return']
                     t_ret_class = "text-emerald-600" if t_ret > 0 else "text-rose-600"
                     t_ret_str = f"{t_ret*100:+.2f}%"
-                    score_str = f"{d['momentum_score']:.2f} / {d['rrg_score']:.2f}"
                     table_rows += f'''
                         <tr class="border-t border-zinc-200 hover:bg-zinc-50">
-                            <td class="px-2 py-1 font-mono font-semibold text-zinc-800">{d['ticker']}</td>
+                            <td class="px-2 py-1 font-mono font-semibold text-[#111]">{d['ticker']}</td>
                             <td class="px-2 py-1 text-right tabular-nums">{d['buy_price']:.2f}</td>
                             <td class="px-2 py-1 text-right tabular-nums">{d['sell_price']:.2f}</td>
                             <td class="px-2 py-1 text-right tabular-nums {t_ret_class}">{t_ret_str}</td>
-                            <td class="px-2 py-1 text-left text-xs text-zinc-500">{score_str}</td>
                         </tr>
                     '''
                 table_html = f'''
                     <table class="w-full text-xs border-collapse mt-1.5">
                         <thead>
-                            <tr class="bg-zinc-100 text-zinc-500">
+                            <tr class="bg-[#f4f4f5] text-[#666]">
                                 <th class="text-left px-2 py-1 font-semibold">标的</th>
-                                <th class="text-right px-2 py-1 font-semibold">买入价</th>
-                                <th class="text-right px-2 py-1 font-semibold">卖出价</th>
-                                <th class="text-right px-2 py-1 font-semibold">回报</th>
-                                <th class="text-left px-2 py-1 font-semibold">分数(动量/RRG)</th>
+                                <th class="text-right px-2 py-1 font-semibold tabular-nums">买入价</th>
+                                <th class="text-right px-2 py-1 font-semibold tabular-nums">卖出价</th>
+                                <th class="text-right px-2 py-1 font-semibold tabular-nums">回报</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -598,17 +590,16 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
                     </table>
                 '''
             else:
-                table_html = '<div class="text-zinc-400 text-sm mt-1">现金持仓</div>'
+                table_html = '<div class="text-[#888] text-xs mt-1">现金持仓</div>'
             f.write(f"""
-                <div class="month-card bg-white border border-zinc-200 rounded-2xl p-3 shadow-sm hover:shadow-md transition-shadow" data-year="{m['year']}">
+                <div class="month-card card rounded-lg p-3" data-year="{m['year']}" data-month="{m['month']}">
                     <div class="flex justify-between items-start mb-1.5">
                         <div>
-                            <div class="font-semibold text-sm">{m['month']}</div>
-                            <div class="text-xs text-zinc-500">{m['buy_date']} → {m['sell_date']}</div>
+                            <div class="font-semibold text-[13px]">{m['month']}</div>
+                            <div class="text-[10px] text-[#777]">{m['buy_date']} → {m['sell_date']}</div>
                         </div>
-                        <div class="px-2 py-0.5 rounded text-xs font-semibold {ret_class}">{ret_str}</div>
+                        <div class="px-1.5 py-px rounded text-[10px] font-medium {ret_class}">{ret_str}</div>
                     </div>
-                    <div class="text-xs text-zinc-500 mb-1">持仓 {m['num_stocks']} 只</div>
                     {table_html}
                 </div>
 """)
@@ -620,49 +611,56 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
             const annualReturns = """ + json.dumps(annual_returns) + """;
             const tvEquityData = """ + json.dumps(tv_equity_series) + """;
             const chartColors = """ + json.dumps(colors_map) + """;
+            const tvDrawdownSeries = """ + json.dumps(tv_drawdown_series) + """;
+            const tvMonthlyData = """ + json.dumps(tv_monthly_data) + """;
+            const tvDDDistData = """ + json.dumps(tv_dd_dist_data) + """;
+            const latestKMetadata = """ + json.dumps(latest_k_metadata) + """;
+            const latestKFallback = """ + json.dumps(latest_k_fallback) + """;
+            const mtdReturnsReport = """ + json.dumps(mtd_returns) + """;
 
             function filterByYear() {
                 const select = document.getElementById('year-select');
                 const year = select.value;
-                const cards = document.querySelectorAll('.month-card');
-                let shown = 0;
-                cards.forEach(card => {
-                    if (!year || card.dataset.year === year) {
-                        card.style.display = 'block';
-                        shown++;
-                    } else {
-                        card.style.display = 'none';
-                    }
+                const allCards = Array.from(document.querySelectorAll('.month-card'));
+                const container = document.getElementById('monthly-cards');
+
+                // hide all
+                allCards.forEach(card => card.style.display = 'none');
+
+                let yearCards = [];
+                if (year) {
+                    yearCards = allCards.filter(card => card.dataset.year === year);
+                    // sort reverse chrono (most recent month first)
+                    yearCards.sort((a, b) => b.dataset.month.localeCompare(a.dataset.month));
+                } else {
+                    yearCards = allCards;
+                }
+
+                // re-append in sorted order and show
+                yearCards.forEach(card => {
+                    container.appendChild(card);
+                    card.style.display = 'block';
                 });
 
-                // update year return display on the right of dropdown
+                // update year return display
                 const retDisplay = document.getElementById('year-return-display');
                 if (retDisplay) {
                     if (year && annualReturns[year] !== undefined) {
                         const ret = annualReturns[year];
                         const retStr = (ret * 100).toFixed(2) + '%';
                         const retClass = ret >= 0 ? 'text-emerald-600' : 'text-rose-600';
-                        retDisplay.innerHTML = `<span class="${retClass} font-bold">当年收益: ${retStr}</span>`;
+                        retDisplay.innerHTML = `<span class="${retClass} font-bold">年收益: ${retStr}</span>`;
                     } else {
                         retDisplay.innerHTML = '';
                     }
                 }
 
-                // update annual summary hint
-                const summary = document.getElementById('annual-summary');
-                if (summary) {
-                    if (year) {
-                        summary.innerHTML = `显示 ${year} 年份的月度持仓卡片（共 ${shown} 个月）。整体年度回报见上方图表。`;
-                    } else {
-                        summary.innerHTML = '显示全部年份月度持仓卡片（共 ' + cards.length + ' 个月）。';
-                    }
-                }
             }
 
             function initTradingViewEquity() {
                 const container = document.getElementById('tv-equity-chart');
                 if (!container || !tvEquityData || Object.keys(tvEquityData).length === 0) {
-                    console.warn('[QuantGT] TV chart data missing');
+                    console.warn('TV chart data missing');
                     return;
                 }
                 function doCreate() {
@@ -670,7 +668,7 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
                         // use client width for responsive
                         const chart = LightweightCharts.createChart(container, {
                             width: container.clientWidth || 800,
-                            height: 420,
+                            height: container.clientHeight || 380,
                             layout: {
                                 background: { color: '#ffffff' },
                                 textColor: '#374151',
@@ -700,7 +698,7 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
                         });
 
                         if (!chart || typeof chart.addLineSeries !== 'function') {
-                            console.error('[QuantGT] createChart did not return a valid chart with addLineSeries. Possible library version/load issue.');
+                            console.error('createChart did not return a valid chart with addLineSeries.');
                             container.innerHTML = '<div style="padding:12px;color:#b91c1c;font-size:12px;background:#fef2f2;border-radius:6px;">累计权益曲线初始化失败（图表库加载异常）。请尝试刷新页面或使用其他浏览器。</div>';
                             return;
                         }
@@ -720,16 +718,16 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
 
                         // handle resize
                         function handleResize() {
-                            chart.resize(container.clientWidth || 800, 420);
+                            chart.resize(container.clientWidth || 800, container.clientHeight || 380);
                         }
                         window.addEventListener('resize', handleResize);
                         // initial fit + ensure visible
                         setTimeout(() => {
-                            if (container.clientWidth) chart.resize(container.clientWidth, 420);
+                            if (container.clientWidth) chart.resize(container.clientWidth, container.clientHeight || 380);
                             try { chart.timeScale().fitContent(); } catch(e) {}
                         }, 80);
                     } catch (err) {
-                        console.error('[QuantGT] TradingView chart creation error:', err);
+                        console.error('TradingView chart creation error:', err);
                         container.innerHTML = '<div style="padding:12px;color:#b91c1c;font-size:12px;background:#fef2f2;border-radius:6px;">累计权益曲线创建出错，请刷新重试。</div>';
                     }
                 }
@@ -746,10 +744,297 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
                             doCreate();
                         } else if (attempts > 12) {
                             clearInterval(iv);
-                            console.warn('[QuantGT] TradingView lightweight-charts failed to load');
+                            console.warn('TradingView lightweight-charts failed to load');
                             container.innerHTML = '<div style="padding:12px;color:#666;font-size:12px;">TradingView 图表库加载失败，请检查网络后刷新。</div>';
                         }
                     }, 100);
+                }
+            }
+
+            function initTradingViewDrawdown() {
+                const container = document.getElementById('tv-drawdown-chart');
+                if (!container || typeof LightweightCharts === 'undefined' || !tvDrawdownSeries || Object.keys(tvDrawdownSeries).length === 0) {
+                    return;
+                }
+                try {
+                    const chart = LightweightCharts.createChart(container, {
+                        width: container.clientWidth || 800,
+                        height: container.clientHeight || 240,
+                        layout: {
+                            background: { color: '#ffffff' },
+                            textColor: '#374151',
+                        },
+                        grid: {
+                            vertLines: { color: '#f3f4f6' },
+                            horzLines: { color: '#f3f4f6' },
+                        },
+                        timeScale: {
+                            borderColor: '#e5e7eb',
+                            timeVisible: false,
+                            secondsVisible: false,
+                        },
+                        rightPriceScale: {
+                            borderColor: '#e5e7eb',
+                        },
+                        crosshair: {
+                            mode: 0,
+                            vertLine: { color: '#d1d5db', width: 1, style: 3 },
+                            horzLine: { color: '#d1d5db', width: 1, style: 3 },
+                        },
+                    });
+
+                    Object.keys(tvDrawdownSeries).forEach(name => {
+                        const data = tvDrawdownSeries[name];
+                        if (!data || data.length === 0) return;
+                        const color = chartColors[name] || '#6b7280';
+                        const series = chart.addLineSeries({
+                            color: color,
+                            lineWidth: name === '策略' ? 2 : 1.5,
+                            title: name,
+                        });
+                        series.setData(data);
+                    });
+
+                    function handleResize() {
+                        chart.resize(container.clientWidth || 800, container.clientHeight || 240);
+                    }
+                    window.addEventListener('resize', handleResize);
+                    setTimeout(() => {
+                        if (container.clientWidth) chart.resize(container.clientWidth, container.clientHeight || 240);
+                        try { chart.timeScale().fitContent(); } catch(e) {}
+                    }, 80);
+                } catch (err) {
+                    console.error('TV drawdown error:', err);
+                    container.innerHTML = '<div style="padding:12px;color:#b91c1c;font-size:12px;background:#fef2f2;border-radius:6px;">回撤图表创建出错，请刷新。</div>';
+                }
+            }
+
+            function initTradingViewMonthly() {
+                const container = document.getElementById('tv-monthly-chart');
+                if (!container || typeof LightweightCharts === 'undefined' || !tvMonthlyData || tvMonthlyData.length === 0) {
+                    return;
+                }
+                try {
+                    const chart = LightweightCharts.createChart(container, {
+                        width: container.clientWidth || 800,
+                        height: container.clientHeight || 240,
+                        layout: {
+                            background: { color: '#ffffff' },
+                            textColor: '#374151',
+                        },
+                        grid: {
+                            vertLines: { color: '#f3f4f6' },
+                            horzLines: { color: '#f3f4f6' },
+                        },
+                        timeScale: {
+                            borderColor: '#e5e7eb',
+                            timeVisible: false,
+                            secondsVisible: false,
+                        },
+                        rightPriceScale: {
+                            borderColor: '#e5e7eb',
+                        },
+                        crosshair: {
+                            mode: 0,
+                            vertLine: { color: '#d1d5db', width: 1, style: 3 },
+                            horzLine: { color: '#d1d5db', width: 1, style: 3 },
+                        },
+                    });
+
+                    const series = chart.addHistogramSeries({
+                        title: '策略月度回报',
+                    });
+                    const coloredData = tvMonthlyData.map(d => ({
+                        time: d.time,
+                        value: d.value,
+                        color: d.value >= 0 ? '#22c55e' : '#ef4444'
+                    }));
+                    series.setData(coloredData);
+
+                    function handleResize() {
+                        chart.resize(container.clientWidth || 800, container.clientHeight || 240);
+                    }
+                    window.addEventListener('resize', handleResize);
+                    setTimeout(() => {
+                        if (container.clientWidth) chart.resize(container.clientWidth, container.clientHeight || 240);
+                        try { chart.timeScale().fitContent(); } catch(e) {}
+                    }, 80);
+                } catch (err) {
+                    console.error('TV monthly error:', err);
+                    container.innerHTML = '<div style="padding:12px;color:#b91c1c;font-size:12px;background:#fef2f2;border-radius:6px;">月度回报图表创建出错，请刷新。</div>';
+                }
+            }
+
+            function initTradingViewDDDist() {
+                const container = document.getElementById('tv-dd-dist-chart');
+                if (!container || typeof LightweightCharts === 'undefined' || !tvDDDistData || tvDDDistData.length === 0) {
+                    return;
+                }
+                try {
+                    const chart = LightweightCharts.createChart(container, {
+                        width: container.clientWidth || 800,
+                        height: container.clientHeight || 240,
+                        layout: {
+                            background: { color: '#ffffff' },
+                            textColor: '#374151',
+                        },
+                        grid: {
+                            vertLines: { color: '#f3f4f6' },
+                            horzLines: { color: '#f3f4f6' },
+                        },
+                        timeScale: {
+                            borderColor: '#e5e7eb',
+                            timeVisible: false,
+                            secondsVisible: false,
+                            tickMarkFormatter: (time, tickMarkType, locale) => {
+                                return ((time - 100000) / 100).toFixed(1) + '%';
+                            },
+                        },
+                        rightPriceScale: {
+                            borderColor: '#e5e7eb',
+                        },
+                    });
+
+                    const series = chart.addHistogramSeries({
+                        title: '回撤分布',
+                        color: '#ef4444',
+                    });
+                    series.setData(tvDDDistData);
+
+                    function handleResize() {
+                        chart.resize(container.clientWidth || 800, container.clientHeight || 240);
+                    }
+                    window.addEventListener('resize', handleResize);
+                    setTimeout(() => {
+                        if (container.clientWidth) chart.resize(container.clientWidth, container.clientHeight || 240);
+                        try { chart.timeScale().fitContent(); } catch(e) {}
+                    }, 80);
+                } catch (err) {
+                    console.error('TV DD dist error:', err);
+                    container.innerHTML = '<div style="padding:4px;color:#666;font-size:10px;">回撤分布图表出错。</div>';
+                }
+            }
+
+            async function fetchYahooCloses(ticker, startDateStr) {
+                const start = Math.floor(new Date(startDateStr).getTime() / 1000);
+                const end = Math.floor(Date.now() / 1000);
+                const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&period1=${start}&period2=${end}`;
+                const proxy = 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url);
+                const resp = await fetch(proxy, { cache: 'no-cache' });
+                if (!resp.ok) throw new Error('proxy fail');
+                const json = await resp.json();
+                const result = json.chart.result[0];
+                const timestamps = result.timestamp;
+                const closes = result.indicators.quote[0].close;
+                const series = [];
+                for (let i = 0; i < timestamps.length; i++) {
+                    if (closes[i] == null) continue;
+                    const dateStr = new Date(timestamps[i] * 1000).toISOString().slice(0, 10);
+                    series.push({ time: dateStr, value: closes[i] });
+                }
+                return series;
+            }
+
+            function updateMTDLive(ticker, mtd) {
+                if (!window.liveMTDs) window.liveMTDs = { ...mtdReturnsReport };
+                window.liveMTDs[ticker] = mtd;
+                refreshMTD();
+            }
+
+            async function initLatestKChart() {
+                const container = document.getElementById('tv-latest-kchart');
+                if (!container || typeof LightweightCharts === 'undefined' || !latestKMetadata || !latestKMetadata.tickers || latestKMetadata.tickers.length === 0) {
+                    return;
+                }
+                try {
+                    const chart = LightweightCharts.createChart(container, {
+                        width: container.clientWidth || 800,
+                        height: 260,
+                        layout: {
+                            background: { color: '#ffffff' },
+                            textColor: '#374151',
+                        },
+                        grid: {
+                            vertLines: { color: '#f3f4f6' },
+                            horzLines: { color: '#f3f4f6' },
+                        },
+                        timeScale: {
+                            borderColor: '#e5e7eb',
+                            timeVisible: false,
+                            secondsVisible: false,
+                            rightOffset: 3,
+                            barSpacing: 18,
+                            minBarWidth: 4,
+                        },
+                        rightPriceScale: {
+                            borderColor: '#e5e7eb',
+                        },
+                    });
+
+                    const colors = ["#22c55e", "#3b82f6", "#f59e0b", "#8b5cf6", "#ec4899"];
+                    const seriesMap = {};
+                    latestKMetadata.tickers.forEach((t, i) => {
+                        const s = chart.addLineSeries({
+                            color: colors[i % colors.length],
+                            lineWidth: 2,
+                            title: t,
+                        });
+                        seriesMap[t] = s;
+                        // initial fallback from report data
+                        if (latestKFallback && latestKFallback[t]) {
+                            s.setData(latestKFallback[t]);
+                        }
+                    });
+
+                    // Fit early so fallback data (if no live) spreads across the chart nicely
+                    try { chart.timeScale().fitContent(); } catch(e) {}
+
+                    // initial MTD from report (equal weight avg)
+                    if (window.liveMTDs === undefined) window.liveMTDs = { ...mtdReturnsReport };
+                    function refreshMTD() {
+                        const vals = Object.values(window.liveMTDs);
+                        const avg = vals.length ? vals.reduce((a,b)=>a+b,0) / vals.length : 0;
+                        const el = document.getElementById('mtd-live');
+                        if (el) {
+                            const pctStr = (avg*100).toFixed(1);
+                            const numClass = avg >= 0 ? 'text-emerald-600' : 'text-rose-600';
+                            el.innerHTML = `<span class="${numClass}">${pctStr}%</span> <span class="text-[9px] text-[#888]">(实时)</span>`;
+                        }
+                    }
+                    refreshMTD();
+
+                    const fetches = latestKMetadata.tickers.map(async (t) => {
+                        try {
+                            const firstClose = latestKMetadata.firstCloses[t];
+                            const start = latestKMetadata.startDate;
+                            const closes = await fetchYahooCloses(t, start);
+                            if (closes.length > 0 && firstClose) {
+                                const seriesData = closes.map(d => ({
+                                    time: d.time,
+                                    value: d.value / firstClose - 1
+                                }));
+                                seriesMap[t].setData(seriesData);
+                                const liveMTD = seriesData[seriesData.length - 1].value;
+                                updateMTDLive(t, liveMTD);
+                            }
+                        } catch (e) {
+                            console.warn('Live fetch failed for ' + t + ', keeping report MTD', e);
+                        }
+                    });
+                    await Promise.all(fetches);
+                    chart.timeScale().fitContent();
+
+                    // Extra delayed resize + fit (consistent with other TV charts) to ensure
+                    // layout is settled and the short ~10-day series is spread out, not crammed right.
+                    setTimeout(() => {
+                        if (container && container.clientWidth) {
+                            chart.resize(container.clientWidth, 260);
+                        }
+                        try { chart.timeScale().fitContent(); } catch(e) {}
+                    }, 80);
+                } catch (err) {
+                    console.error('TV latest K error:', err);
+                    container.innerHTML = '<div style="padding:4px;color:#666;font-size:10px;">走势图表出错，使用报告数据。</div>';
                 }
             }
 
@@ -766,31 +1051,28 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
                         sel.value = opts[0];
                     }
                     filterByYear();
-                } else {
-                    // fallback show all summary
-                    const summary = document.getElementById('annual-summary');
-                    if (summary) summary.innerHTML = '显示全部年份月度持仓卡片（共 ' + document.querySelectorAll('.month-card').length + ' 个月）。';
                 }
 
                 // clear or set initial return display (filterByYear handles for default year)
-                console.log('%c[QuantGT] Performance report ready (TV equity + default 2026 holdings)', 'color:#64748b');
+                console.log('%c[Report] Performance report ready (TV charts + default 2026 holdings)', 'color:#64748b');
 
-                // init TV equity a little later: ensures DOM layout + script fully settled (avoids 0-width container and rare load races)
+                // init TV charts a little later for layout
                 setTimeout(initTradingViewEquity, 120);
+                setTimeout(initTradingViewDrawdown, 150);
+                setTimeout(initTradingViewMonthly, 150);
+                setTimeout(initTradingViewDDDist, 180);
+                setTimeout(initLatestKChart, 150);
             }
 
             // Run sync immediately (this script executes after #monthly-cards in DOM)
             initializeAll();
         </script>
 
-        <div class="text-center text-sm text-zinc-400 mt-10">
-            Generated by QuantGT • Russell 1000 NPORT 持仓策略 • 数据来源：IB Gateway + SEC NPORT-P
-        </div>
     </div>
 </body>
 </html>""")
 
-    print(f"[info] HTML 回测仪表盘已生成（{months} 个月） — 专业仪表盘风格（参考 quantgt.io/performance）")
+    print(f"[info] HTML 已生成 → index.html")
 
 def _calculate_metrics(returns: pd.Series) -> dict:
     """计算回测指标（已增强边界情况防护）"""

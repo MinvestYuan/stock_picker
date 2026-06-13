@@ -10,7 +10,7 @@ from strategy.stock_selector import score_universe
 
 
 def backtest_nport_monthly(
-    price_map: Dict[str, pd.Series],
+    price_map: Dict[str, pd.DataFrame],
     features: Dict[str, pd.DataFrame],
     monthly_universes: Dict[str, List[str]],
     benchmark_ticker: str = DEFAULT_BENCHMARK,
@@ -56,11 +56,13 @@ def backtest_nport_monthly(
 
         # Risk overlay: QQQ 50/200 MA 熊市保护（按用户要求）
         # 当 QQQ 50MA < 200MA 时，全仓现金；反之重启策略
+        # 注意：price_map 现为 OHLC DataFrame（为支持浏览器 K 线 MTD），需提取 close 序列
         qqq_bear = False
         if "QQQ" in price_map:
-            qqq_series = price_map["QQQ"]
-            qqq_ema50 = qqq_series.ewm(span=50, adjust=False).mean()
-            qqq_ema200 = qqq_series.ewm(span=200, adjust=False).mean()
+            qqq_raw = price_map["QQQ"]
+            qqq_close = qqq_raw["close"] if isinstance(qqq_raw, pd.DataFrame) and "close" in qqq_raw.columns else qqq_raw
+            qqq_ema50 = qqq_close.ewm(span=50, adjust=False).mean()
+            qqq_ema200 = qqq_close.ewm(span=200, adjust=False).mean()
             try:
                 q50 = float(qqq_ema50.loc[:asof_date].iloc[-1])
                 q200 = float(qqq_ema200.loc[:asof_date].iloc[-1])
@@ -95,8 +97,8 @@ def backtest_nport_monthly(
                 continue
             pseries = price_map[ticker]
             try:
-                buy_price = float(pseries.loc[buy_date])
-                sell_price = float(pseries.loc[sell_date])
+                buy_price = float(pseries.loc[buy_date, "close"])
+                sell_price = float(pseries.loc[sell_date, "close"])
                 ret = (sell_price / buy_price) - 1.0
                 rets.append(ret)
                 selected.append(ticker)
@@ -217,8 +219,8 @@ def backtest_monthly_returns(
                 continue
             pseries = price_map[ticker]
             try:
-                buy_price = float(pseries.loc[buy_date])
-                sell_price = float(pseries.loc[sell_date])
+                buy_price = float(pseries.loc[buy_date, "close"])
+                sell_price = float(pseries.loc[sell_date, "close"])
                 ret = (sell_price / buy_price) - 1.0
                 rets.append(ret)
                 selected.append(ticker)
