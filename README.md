@@ -67,6 +67,30 @@ python main.py backtest --top 5
 - 可配置 GitHub Actions 在 backtest 后自动 push index.html
 - 报告使用 Tailwind CDN + lightweight-charts CDN，其余全部内嵌
 
+### 部署到 Vercel（简单免费静态托管）
+1. 生成 `index.html` 后提交（可单独建 report 仓库或直接本仓库）：
+   ```bash
+   git add index.html
+   git commit -m "Update Minvest report"
+   git push
+   ```
+
+2. Vercel：
+   - 访问 https://vercel.com ，用 GitHub 登录
+   - 点击 **Add New Project** → Import Git Repository → 选择本仓库
+   - Framework Preset: **Other**
+   - Build Command: 留空
+   - Output Directory: 留空（根目录）
+
+3. 部署完成即可得到 `https://xxx.vercel.app` 地址，自动 HTTPS。
+
+**提示**：
+- 项目中已添加 `.vercelignore`，部署时只会包含 `index.html`（干净的报告站点，不暴露 Python 源码等文件）。
+- 如需访问保护：在 Vercel 项目 Settings → General → Password Protection 开启。
+- 推荐绑定自定义域名。
+- 每次更新报告后 push，Vercel 会自动重新部署。
+- 相比 Pages，Vercel 预览部署、速度、边缘网络体验往往更好。
+
 ### 常用命令
 ```bash
 python main.py backtest --top 5                 # 生成 index.html（推荐）

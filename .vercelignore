@@ -1,0 +1,4 @@
+﻿# Only deploy the static report HTML to Vercel site.
+# All other files (source code, etc.) remain in the Git repo but are excluded from the Vercel deployment for a clean site.
+*
+!index.html
