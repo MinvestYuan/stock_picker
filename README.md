@@ -54,11 +54,21 @@ GitHub 仅用于存放代码和部署静态报告。
    ```
 
 2. GitHub Pages 设置（只需设置一次）：
-   - 进入仓库 Settings → Pages
-   - Source: Deploy from a branch
-   - Branch: **main**（或你的主分支）
-   - Folder: **/ (root)**
-   - 保存后，等待几分钟，报告将自动部署到 `https://<你的用户名>.github.io/<仓库名>/` （例如 `https://haominyuan.github.io/stock_picker/`）
+   - 这个仓库（stock_picker）是**隐私项目**，包含完整源码。
+   - 公开部署仓库是 **Minvest** (https://github.com/HaominYuan/Minvest) ，只包含 index.html。
+   - 流程：生成 index.html 后，复制到 Minvest 仓库根目录，然后：
+     ```bash
+     cd ../Minvest   # 假设 Minvest 克隆在同级目录
+     cp ../stock_picker/index.html .
+     git add index.html
+     git commit -m "Update Minvest report"
+     git push
+     ```
+   - 在 Minvest 仓库 Settings → Pages:
+     - Source: Deploy from a branch
+     - Branch: **main**
+     - Folder: **/ (root)**
+   - 报告将部署到 `https://haominyuan.github.io/Minvest/`
 
 **提示**：
 - 报告完全静态，离线可用，支持自定义域名（在 Pages 设置中添加）。
