@@ -30,6 +30,7 @@ from data.nport_universe import (
 )
 from data.nport_data import sync_holdings_if_needed
 from data.ticker_resolver import TickerResolver
+from datetime import datetime
 
 
 RUSSELL_BACKTEST_HTML = Path("russell1000_backtest.html")
@@ -94,6 +95,19 @@ def _load_or_update_prices(tickers, args, cache_file, duration=None):
             max_age = get_cache_data_max_age_days(price_map)
             if max_age is not None and max_age > 7:
                 print(f"[info] 缓存中最新的数据已 {max_age} 天未更新，将进行增量刷新", file=sys.stderr)
+
+    # 同一天重复运行保护（以本地仓库 mtime 为准）：如果价格缓存文件今天已更新过，直接跳过 IB 增量部分
+    # 避免用户多次运行 backtest 时反复看到“需要从 IB 获取/更新数据：N 只”
+    # 第一次运行当天会正常做 trading-day 追平，之后同日运行使用缓存。
+    if price_map and cache_file.exists():
+        try:
+            mtime = datetime.fromtimestamp(cache_file.stat().st_mtime)
+            age_days = (datetime.now() - mtime).days
+            if age_days == 0:
+                print(f"[info] 价格缓存今天已更新（文件 {age_days} 天前），跳过重复从 IB Gateway 增量更新（使用缓存数据）", file=sys.stderr)
+                return price_map
+        except Exception:
+            pass
 
     print(f"[info] 正在从 IB Gateway 按需增量更新到最近一个交易日的数据（目标 {len(tickers)} 只股票）...", file=sys.stderr)
     num_conn = getattr(args, "num_connections", 4)
