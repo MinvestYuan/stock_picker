@@ -1,5 +1,5 @@
 {
-  "$schema": "node_modules/wrangler/config-schema.json",
+  "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "minvest",
   "compatibility_date": "2026-06-14",
   "observability": {
@@ -7,8 +7,5 @@
   },
   "assets": {
     "directory": "."
-  },
-  "compatibility_flags": [
-    "nodejs_compat"
-  ]
+  }
 }

@@ -42,54 +42,48 @@ python main.py backtest --top 5
 - 输出：`index.html`（单文件静态报告，内嵌全部数据 + TradingView 轻量图表 + 年份过滤 + 详细月度持仓卡片）
 - 报告完全离线可用
 
-### 部署到 GitHub + Cloudflare Pages（推荐私有）
-1. 生成 `index.html` 后提交（可单独建 report 仓库或直接本仓库）：
+### 部署（唯一方式：Git push 自动部署）
+
+**从现在开始，唯一部署方式是 git push。**  
+其他所有本地部署方式（直接运行 npm run deploy 等）已全部取消。推送代码到主分支后，Cloudflare 会自动完成构建和部署。
+
+1. 生成 `index.html` 后提交并推送（可单独建 report 仓库或直接本仓库）：
    ```bash
    git add index.html
    git commit -m "Update Minvest report"
    git push
    ```
 
-2. Cloudflare Pages：
-   - Pages → Create project → Connect to Git
-   - Framework preset: **None**
-   - Build command: 留空
-   - Output directory: 留空（根目录）
+2. Cloudflare Git 自动部署配置（只需配置一次）：
+   - Cloudflare dashboard 进入 **Workers & Pages** → 找到你的 `minvest` Worker → **Settings** → **Builds**
+   - 配置 Build settings：
+     - Build command: `npm ci`
+     - Deploy command: `npm run deploy`
+     - Root directory: 留空
+     - 生产分支: main（或你的主分支）
+   - **关键：添加 Build secret（让所有 build 都使用 .env 里的 token）**
+     - 在 **Build variables and secrets** 区域添加 Secret：
+       - Name: `CLOUDFLARE_API_TOKEN`
+       - Value: 打开你本地的 `.env` 文件，复制完整的 token 值（`cfut_...` 那整行）
+     - （可选）再添加 Secret：
+       - Name: `CLOUDFLARE_ACCOUNT_ID`
+       - Value: 从 .env 复制对应的值
+   - **注意**：Worker 名称必须与 `wrangler.jsonc` 里的 `"name": "minvest"` 一致（可在 dashboard 修改或同步 config）。
+   - 保存后，**每次 push 到主分支都会自动触发 Cloning → Installing → Deploying**，最终部署到 Worker。
 
-3. Cloudflare Access（仅自己可见）：
-   - Zero Trust → Access → Applications → Add self-hosted application
-   - 绑定 Pages URL
+3. Cloudflare Access（仅自己可见，强烈推荐）：
+   - Zero Trust → Access → Applications → Add an application（选 Self-hosted 或 Worker 相关）
+   - 绑定 Worker URL（`minvest.*.workers.dev` 或自定义域名）
    - Policy：Allow + Include Email（你的邮箱）
    - 访问时强制 Cloudflare 登录验证
 
 **提示**：
-- 推荐绑定自定义域名后再用 Access 保护
-- 可配置 GitHub Actions 在 backtest 后自动 push index.html
-- 报告使用 Tailwind CDN + lightweight-charts CDN，其余全部内嵌
-
-### 部署到 Vercel（简单免费静态托管）
-1. 生成 `index.html` 后提交（可单独建 report 仓库或直接本仓库）：
-   ```bash
-   git add index.html
-   git commit -m "Update Minvest report"
-   git push
-   ```
-
-2. Vercel：
-   - 访问 https://vercel.com ，用 GitHub 登录
-   - 点击 **Add New Project** → Import Git Repository → 选择本仓库
-   - Framework Preset: **Other**
-   - Build Command: 留空
-   - Output Directory: 留空（根目录）
-
-3. 部署完成即可得到 `https://xxx.vercel.app` 地址，自动 HTTPS。
-
-**提示**：
-- 项目中已添加 `.vercelignore`，部署时只会包含 `index.html`（干净的报告站点，不暴露 Python 源码等文件）。
-- 如需访问保护：在 Vercel 项目 Settings → General → Password Protection 开启。
-- 推荐绑定自定义域名。
-- 每次更新报告后 push，Vercel 会自动重新部署。
-- 相比 Pages，Vercel 预览部署、速度、边缘网络体验往往更好。
+- 项目中已添加 `.assetsignore`，部署时只会包含 `index.html`（干净的报告站点，不暴露 Python 源码等文件）。
+- `.env` 仅本地使用（已加入 .gitignore，绝不会提交）。CI 构建通过 Dashboard 的 Build secrets 注入 `CLOUDFLARE_API_TOKEN`，所有 build 都使用你 .env 里的这个 token。
+- 推荐绑定自定义域名后再用 Access 保护。
+- 报告使用 Tailwind CDN + lightweight-charts CDN，其余全部内嵌。
+- 本地仅可预览（不部署）：先加载 .env token 后运行 `npm run dev`
+- 非主分支 push 时，默认会用 preview 版本（可获得预览 URL，不影响生产）。
 
 ### 常用命令
 ```bash

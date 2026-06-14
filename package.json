@@ -1,0 +1,14 @@
+{
+  "name": "minvest",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Minvest - Russell 1000 NPORT backtest static report hosted on Cloudflare Workers. 'deploy' script is ONLY for Cloudflare Git CI builds (do not run locally).",
+  "scripts": {
+    "deploy": "node -e \"if (!process.env.CI && !process.env.WORKERS_CI) { console.error('ERROR: Local deploy cancelled! ONLY git push is allowed for deployment (see README). All builds use the token from your local .env via Dashboard Build secrets.'); process.exit(1); }\" && wrangler deploy",
+    "dev": "wrangler dev",
+    "preview": "wrangler versions upload"
+  },
+  "devDependencies": {
+    "wrangler": "^4"
+  }
+}

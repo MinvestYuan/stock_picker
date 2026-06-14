@@ -1,0 +1,6 @@
+# Only deploy the static report HTML to the Cloudflare Worker.
+# All other files (Python source, caches, etc.) stay in the Git repo but are excluded from the Worker asset upload.
+# This keeps the deployed site clean and does not expose backend code.
+
+**
+!index.html
