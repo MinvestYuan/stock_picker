@@ -174,7 +174,7 @@ def get_cache_data_max_age_days(price_map: Dict[str, pd.Series]) -> int | None:
     if max_date is None:
         return None
     if hasattr(max_date, "tz") and max_date.tz is not None:
-        max_date = max_date.tz_convert(None)
+        max_date = max_date.tz_localize(None)
     now = pd.Timestamp.now().tz_localize(None)
     return int((now - max_date).days)
 
@@ -271,8 +271,10 @@ def _calculate_incremental_duration(last_date: pd.Timestamp, target_end: pd.Time
     if target_end is None:
         target_end = pd.Timestamp.now(tz="US/Eastern").floor("D")
     # 确保时区一致
+    if hasattr(target_end, "tz") and target_end.tz is not None:
+        target_end = target_end.tz_localize(None)
     if hasattr(last_date, "tz") and last_date.tz is not None:
-        last_date = last_date.tz_convert(None)
+        last_date = last_date.tz_localize(None)
     days_missing = int((target_end - last_date).days) + 10  # 缓冲期（周末/节假日）
     if days_missing <= 14:
         return "2 W"
@@ -284,6 +286,46 @@ def _calculate_incremental_duration(last_date: pd.Timestamp, target_end: pd.Time
         return "1 Y"
     else:
         return DEFAULT_DURATION
+
+
+def _get_latest_trading_day(reference: pd.Timestamp | None = None) -> pd.Timestamp:
+    """返回“最近一个交易日”（美东时区）。
+
+    逻辑（直接追最新交易日，无冷却/天数检查）：
+    - 总是基于参考日期（通常是 target_end 的 floored 日期）。
+    - 如果参考日 == 真实今天，则使用真实当前时刻判断是否已过 16:30 收盘，从而决定是否把“今天”算作最新交易日。
+    - 否则（历史 asof 或周末），用 BDay + 周末检查回退到合适的上一个交易日。
+    - 目的：同一天多次运行时（只要缓存已有当前最新交易日的 bar），完全跳过 IB。
+      只有新交易日数据可用时才触发一次针对性的短增量获取。
+    """
+    if reference is None:
+        reference = pd.Timestamp.now(tz="US/Eastern")
+
+    if hasattr(reference, "tz") and reference.tz is not None:
+        ref = reference.tz_localize(None)
+    else:
+        ref = reference
+
+    day = ref.normalize()
+
+    real_now = pd.Timestamp.now(tz="US/Eastern").tz_localize(None)
+    real_today = real_now.normalize()
+
+    if day == real_today:
+        # 实时运行今天，用真实时刻判断收盘
+        effective_ref = real_now
+    else:
+        # 历史 asof 日或其它，视为该日的“结束”
+        effective_ref = day + pd.Timedelta(hours=23, minutes=59)
+
+    if day.weekday() >= 5:  # Sat/Sun
+        return (day - pd.offsets.BDay(1)).normalize()
+
+    close_cutoff = day + pd.Timedelta(hours=16, minutes=30)
+    if effective_ref >= close_cutoff:
+        return day
+    else:
+        return (day - pd.offsets.BDay(1)).normalize()
 
 
 def _fetch_bars(ib: IB, ticker: str, end_date_str: str, duration_str: str) -> list | None:
@@ -325,14 +367,25 @@ def _get_fetch_info(
     target_end: pd.Timestamp,
     default_duration: str,
 ) -> Tuple[str, bool, pd.Timestamp | None] | None:
-    """返回 (duration_str, is_incremental, last_date) 如果需要从IB获取，否则返回 None 表示跳过（数据已新鲜）。"""
+    """返回 (duration_str, is_incremental, last_date) 如果需要从IB获取，否则返回 None 表示跳过。
+
+    新逻辑（按用户要求）：
+    - 不使用任何“冷却时间”（文件mtime）或“新鲜度天数检查”。
+    - 直接计算“最近一个交易日”（_get_latest_trading_day）。
+    - 如果缓存的 last_date 已经 >= 该最近交易日，则认为已拥有最新交易日数据，跳过 IB 请求。
+    - 否则，进行增量更新（_calculate_incremental_duration 会根据缺失天数选择最短的 2W/2M 等短 duration）。
+    - 效果：同一天内多次运行（只要最新交易日数据已在缓存中），不会重复请求；只有当出现新的交易日数据时，才会去获取追平。
+    """
     last_date = None
     if existing is not None and not existing.empty:
         last_date = existing.index.max()
         if hasattr(last_date, "tz") and last_date.tz is not None:
-            last_date = last_date.tz_convert(None)
-        if last_date >= target_end - pd.Timedelta(days=2):
+            last_date = last_date.tz_localize(None)
+
+        latest_trading_day = _get_latest_trading_day(target_end)
+        if last_date >= latest_trading_day:
             return None
+
         duration_str = _calculate_incremental_duration(last_date, target_end)
         is_incremental = True
     else:
@@ -411,6 +464,9 @@ def fetch_or_update_history(
     每个连接内部仍顺序 + pause_seconds 以遵守 IB pacing 限制。
 
     调用时可通过 host/port/client_id 指定连接参数（当未提供 ib 或使用多连接时会内部创建）。
+
+    增量决策：不再有冷却时间/新鲜度天数检查，直接通过 _get_latest_trading_day + _get_fetch_info
+    判断是否已拥有“最近一个交易日”的数据；若缺少则用最短合理的 duration 增量获取。
     """
     results: Dict[str, pd.Series] = dict(existing_price_map) if existing_price_map is not None else {}
     end_date_str = ""
@@ -419,8 +475,9 @@ def fetch_or_update_history(
 
     target_end = end_date or pd.Timestamp.now(tz="US/Eastern").floor("D")
     # 统一转换为 tz-naive，避免与缓存中的 tz-naive 时间戳比较出错
+    # 注意：用 tz_localize(None) 而非 tz_convert(None)，保留本地日期数字（ET midnight）
     if hasattr(target_end, "tz") and target_end.tz is not None:
-        target_end = target_end.tz_convert(None)
+        target_end = target_end.tz_localize(None)
 
     # 预先筛选需要从 IB 请求的 ticker（跳过已新鲜的 + 已知失败的垃圾 ticker）
     failed = load_failed_price_tickers()

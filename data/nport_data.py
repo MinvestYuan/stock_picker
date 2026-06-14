@@ -7,6 +7,9 @@ NPORT Data Manager — 核心数据层
 - 价格数据已有优秀增量逻辑（data_fetcher），这里专注 NPORT 持仓
 - 对外提供干净的 get_latest_universe() / get_monthly_universes()
 
+获取 filing 列表已优化为使用 SEC efts 全文搜索（q=seriesId & forms=NPORT-P），
+直接命中 IWB，无需拉取 CIK 下全部 NPORT-P 再 probe 过滤。
+
 数据文件：
 - nport_filings_index.json   （轻量索引，永远快速加载）
 - nport_holdings_cache.json  （完整持仓数据，保持向后兼容）
@@ -39,6 +42,7 @@ NPORT_XML_DIR = ROOT_DIR / "nport_xmls"  # kept at root for now (raw downloads)
 
 CIK = "0001100663"
 SERIES_ID = "S000004347"
+BOOTSTRAP_START_DATE = "2019-01-01"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 (contact: user@example.com)",
@@ -311,92 +315,89 @@ def _save_holdings_cache(cache: Dict[str, List[Dict]]):
     _save_holdings_cache_json(cache)  # 可在迁移完成后移除此行
 
 
-# ==================== SEC 元数据获取（轻量） ====================
+# ==================== SEC 元数据获取（轻量）——改用 efts 全文搜索直接按 series 命中 ====================
 
-def fetch_nport_filings_metadata() -> List[Dict]:
-    """仅获取所有 NPORT-P 的 accession + filingDate + reportDate。
-    优化版：
-    - 12h 本地缓存
-    - 跳过明显太旧的 archive files（根据 DB 中的 max_filing_date）
+def fetch_iwb_filings_via_efts(start_date: str = BOOTSTRAP_START_DATE, end_date: str | None = None) -> List[Dict]:
+    """通过 SEC 全文搜索直接定位 IWB (series=S000004347) 的 NPORT-P 申报。
+
+    相比旧的 submissions/CIK + 按 series 流式 probe 方式：
+    - 一次请求直接命中目标 series 的 filing（无需下载整个 CIK 下的上千个 NPORT-P）
+    - 返回结果仅包含 IWB，无需二次过滤
+    - 支持自定义日期范围，日常检查时可做窄查询
+    - 历史总量极小（~季度 4 次，6 年仅 ~27 条）
     """
-    # 先尝试短时缓存
-    cached_filings, _ = _load_metadata_cache()
-    if cached_filings is not None:
-        return cached_filings
+    if end_date is None:
+        end_date = datetime.now().strftime("%Y-%m-%d")
 
-    # 从 DB 取我们已知的最新 filing 日期，用于跳过老 archive
-    max_known_filing = _get_meta("max_filing_date", "")
+    # 只有请求“全量 bootstrap”时才尝试 12h 短时缓存（窄范围查询总是 fresh，以获取最新）
+    want_full = start_date <= BOOTSTRAP_START_DATE and end_date >= datetime.now().strftime("%Y-%m-%d")
+    if want_full:
+        cached_filings, _ = _load_metadata_cache()
+        if cached_filings is not None:
+            return cached_filings
 
-    # 真正去拉主 submissions
-    url = f"https://data.sec.gov/submissions/CIK{CIK}.json"
-    resp = requests.get(url, headers=HEADERS, timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
+    base_url = (
+        "https://efts.sec.gov/LATEST/search-index"
+        f"?q=%22{SERIES_ID}%22&forms=NPORT-P"
+        f"&dateRange=custom&startdt={start_date}&enddt={end_date}"
+    )
 
     filings: List[Dict] = []
+    from_idx = 0
+    size = 100
+    while True:
+        if from_idx == 0:
+            url = base_url
+        else:
+            url = f"{base_url}&from={from_idx}&size={size}"
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            print(f"[nport_data] efts search 请求失败: {e}")
+            break
 
-    def extract(source, skip_old_archives=True):
-        if "filings" in source and "recent" in source["filings"]:
-            recent = source["filings"]["recent"]
-            for i in range(len(recent["accessionNumber"])):
-                if recent["form"][i] == "NPORT-P":
-                    filings.append({
-                        "accessionNumber": recent["accessionNumber"][i],
-                        "filingDate": recent["filingDate"][i],
-                        "reportDate": recent.get("reportDate", [None] * len(recent["accessionNumber"]))[i] or "",
-                    })
-        if "files" in source.get("filings", {}):
-            for f in source["filings"]["files"]:
-                # 优化：如果这个 archive 的文件名看起来很旧（例如 2020 或更早），且我们已有较新数据，就跳过
-                if skip_old_archives and max_known_filing:
-                    # 简单启发式：文件名里包含的年份
-                    fname = f.get("name", "")
-                    if any(old in fname for old in ["2018", "2019", "2020", "2021", "2022"]):
-                        # 如果我们已经有 2023+ 的数据，就大胆跳过很老的 archive
-                        if max_known_filing >= "2023-01-01":
-                            continue
-                try:
-                    r = requests.get(f"https://data.sec.gov/submissions/{f['name']}", headers=HEADERS, timeout=30)
-                    r.raise_for_status()
-                    extract(r.json(), skip_old_archives=skip_old_archives)
-                except Exception:
-                    continue
+        hits = data.get("hits", {}).get("hits", [])
+        for hit in hits:
+            src = hit.get("_source", {})
+            acc = src.get("adsh") or ""
+            if not acc:
+                continue
+            filings.append({
+                "accessionNumber": acc,
+                "filingDate": src.get("file_date", ""),
+                "reportDate": src.get("period_ending", ""),
+            })
 
-    extract(data)
+        if len(hits) < size:
+            break
+        from_idx += size
+        # 礼貌延迟（efts 也是 SEC，防止过快）
+        time.sleep(REQUEST_DELAY)
 
-    # 去重 + 排序
+    # 去重 + 按 filingDate 升序（与旧行为保持一致，便于上游处理）
     seen = set()
     unique = []
-    for f in filings:
-        if f["accessionNumber"] not in seen:
+    for f in sorted(filings, key=lambda x: x.get("filingDate") or ""):
+        if f["accessionNumber"] and f["accessionNumber"] not in seen:
             seen.add(f["accessionNumber"])
             unique.append(f)
-    unique.sort(key=lambda x: x["filingDate"])
 
-    # 写入短时缓存
-    _save_metadata_cache(unique)
+    if want_full:
+        _save_metadata_cache(unique)
+
+    print(f"[nport_data] 全文搜索完成：命中 {len(unique)} 个 IWB 申报 (range {start_date}..{end_date})")
     return unique
 
 
-# ==================== 流式快速判断是否目标 series ====================
+def fetch_nport_filings_metadata() -> List[Dict]:
+    """仅获取 IWB 的 NPORT-P 元数据（向后兼容接口）。
 
-def _is_target_series(accession: str) -> bool:
-    """流式下载前 12KB 判断 seriesId（极快）"""
-    acc_nodash = accession.replace("-", "")
-    url = f"https://www.sec.gov/Archives/edgar/data/{int(CIK)}/{acc_nodash}/primary_doc.xml"
-    try:
-        resp = requests.get(url, headers=HEADERS, stream=True, timeout=20)
-        resp.raise_for_status()
-        chunk = b""
-        for data in resp.iter_content(chunk_size=4096):
-            chunk += data
-            if len(chunk) >= 12 * 1024:
-                break
-        resp.close()
-        text = chunk.decode("utf-8", errors="ignore")
-        return SERIES_ID in text
-    except Exception:
-        return False
+    现在内部委托给 fetch_iwb_filings_via_efts 实现全文搜索，
+    彻底避免拉取 CIK 下大量无关 series 的 NPORT-P 列表及后续 probe。
+    """
+    return fetch_iwb_filings_via_efts(start_date=BOOTSTRAP_START_DATE)
 
 
 def download_and_parse_full_xml(accession: str) -> Optional[List[Dict]]:
@@ -538,16 +539,25 @@ def sync_holdings_if_needed(
     # 真正需要做网络检查时才打印（避免无意义的噪音）
     print("[nport_data] 正在轻量检查 SEC 最新 NPORT-P 申报...", flush=True)
 
-    # 2. 获取元数据（带12h本地缓存）
-    all_filings = fetch_nport_filings_metadata()
-
-    # 3. 按用户指定：只看最近 lookback_months 个月 + 增量过滤
+    # 2. 使用 efts 全文搜索直接获取 IWB 目标 filing（支持日期范围窄查询，零无关结果）
     db_known = set(_load_holdings_from_db().keys())
     json_known = set(index.get("filings", {}).keys())
     known = db_known | json_known
     max_local_filing = index.get("max_filing_date", "") or _get_meta("max_filing_date", "")
 
     cutoff = (datetime.now() - pd.DateOffset(months=lookback_months)).strftime("%Y-%m-%d")
+
+    # 选择 efts 查询的 startdt：日常用 cutoff，必要时往前 margin 避免漏掉迟报/修订
+    search_start = cutoff
+    if max_local_filing:
+        try:
+            ml = pd.to_datetime(max_local_filing)
+            margin_start = (ml - pd.DateOffset(months=3)).strftime("%Y-%m-%d")
+            search_start = min(cutoff, margin_start)
+        except Exception:
+            pass
+
+    all_filings = fetch_iwb_filings_via_efts(start_date=search_start)
 
     recent_filings = [
         f for f in all_filings
@@ -557,7 +567,7 @@ def sync_holdings_if_needed(
     # 按 filingDate 降序排序（最新在前），以便早停
     recent_filings.sort(key=lambda x: x.get("filingDate", ""), reverse=True)
 
-    # 4. 顺序处理 + 早停：一旦发现一个之前读过的 filing，立即暂停读取更早的
+    # 3. 顺序处理 + 早停：所有 efts 返回的均为 IWB 目标 series，无需再 probe
     new_target_filings = []
     for f in recent_filings:
         acc = f["accessionNumber"]
@@ -568,9 +578,7 @@ def sync_holdings_if_needed(
             else:
                 print(f"[nport_data] 最近的 filing 已知，跳过本次检查。")
             break
-        time.sleep(REQUEST_DELAY)  # 保持礼貌
-        if _is_target_series(acc):
-            new_target_filings.append(f)
+        new_target_filings.append(f)
 
     if not new_target_filings and not force:
         now_iso = _now_iso()
