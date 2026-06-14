@@ -42,48 +42,69 @@ python main.py backtest --top 5
 - 输出：`index.html`（单文件静态报告，内嵌全部数据 + TradingView 轻量图表 + 年份过滤 + 详细月度持仓卡片）
 - 报告完全离线可用
 
-### 部署（唯一方式：Git push 自动部署）
+### 部署（手动使用 Cloudflare / Wrangler）
 
-**从现在开始，唯一部署方式是 git push。**  
-其他所有本地部署方式（直接运行 npm run deploy 等）已全部取消。推送代码到主分支后，Cloudflare 会自动完成构建和部署。
+GitHub 现在**仅用于存放代码**，不再用于自动部署。  
+所有部署都通过 Cloudflare Workers + wrangler CLI 手动完成（使用你本地的 `.env` 中的 token）。
 
-1. 生成 `index.html` 后提交并推送（可单独建 report 仓库或直接本仓库）：
-   ```bash
-   git add index.html
-   git commit -m "Update Minvest report"
-   git push
+1. 生成报告：
+   ```powershell
+   python main.py backtest --top 5
    ```
 
-2. Cloudflare Git 自动部署配置（只需配置一次）：
-   - Cloudflare dashboard 进入 **Workers & Pages** → 找到你的 `minvest` Worker → **Settings** → **Builds**
-   - 配置 Build settings：
-     - Build command: `npm ci`
-     - Deploy command: `npm run deploy`
-     - Root directory: 留空
-     - 生产分支: main（或你的主分支）
-   - **关键：添加 Build secret（让所有 build 都使用 .env 里的 token）**
-     - 在 **Build variables and secrets** 区域添加 Secret：
-       - Name: `CLOUDFLARE_API_TOKEN`
-       - Value: 打开你本地的 `.env` 文件，复制完整的 token 值（`cfut_...` 那整行）
-     - （可选）再添加 Secret：
-       - Name: `CLOUDFLARE_ACCOUNT_ID`
-       - Value: 从 .env 复制对应的值
-   - **注意**：Worker 名称必须与 `wrangler.jsonc` 里的 `"name": "minvest"` 一致（可在 dashboard 修改或同步 config）。
-   - 保存后，**每次 push 到主分支都会自动触发 Cloning → Installing → Deploying**，最终部署到 Worker。
+2. 部署到 Cloudflare Worker：
+   - 确保 `.env` 中有你的最新 `CLOUDFLARE_API_TOKEN`（和可选的 `CLOUDFLARE_ACCOUNT_ID`）。
+   - 运行：
+     ```powershell
+     # 加载 token 并部署（仅上传 index.html，因为有 .assetsignore）
+     Get-Content .env | ForEach-Object { if ($_ -match '^(CLOUDFLARE_[^=]+)=(.*)$') { $env:($matches[1]) = $matches[2] } }; npm run deploy
+     ```
+   - 或者直接：
+     ```powershell
+     npx wrangler deploy
+     ```
+   - 部署后访问：`https://minvest.<你的子域>.workers.dev`
 
-3. Cloudflare Access（仅自己可见，强烈推荐）：
-   - Zero Trust → Access → Applications → Add an application（选 Self-hosted 或 Worker 相关）
-   - 绑定 Worker URL（`minvest.*.workers.dev` 或自定义域名）
-   - Policy：Allow + Include Email（你的邮箱）
-   - 访问时强制 Cloudflare 登录验证
+3. **重要：取消 GitHub 自动部署集成（避免 build token 问题）**
+   - 登录 Cloudflare Dashboard → Workers & Pages → 找到 `minvest` Worker。
+   - Settings → Builds。
+   - 如果有 Git 仓库连接，点击 **Disconnect** 或 **Manage** → 断开 Git 集成。
+   - 或者在 Builds 设置中清空 Build command / Deploy command（改成不自动部署）。
+   - 以后 push 到 GitHub 不会再触发构建/部署。
+
+4. Cloudflare Access（仅自己可见，强烈推荐）：
+   - Zero Trust → Access → Applications → Add an application（选 Self-hosted 或 Worker 相关）。
+   - 绑定 Worker URL（`minvest.*.workers.dev` 或自定义域名）。
+   - Policy：Allow + Include Email（你的邮箱）。
+   - 访问时强制 Cloudflare 登录验证。
 
 **提示**：
 - 项目中已添加 `.assetsignore`，部署时只会包含 `index.html`（干净的报告站点，不暴露 Python 源码等文件）。
-- `.env` 仅本地使用（已加入 .gitignore，绝不会提交）。CI 构建通过 Dashboard 的 Build secrets 注入 `CLOUDFLARE_API_TOKEN`，所有 build 都使用你 .env 里的这个 token。
+- `.env` 仅本地使用（已加入 .gitignore，绝不会提交到 GitHub）。部署时通过加载 .env 使用 token。
 - 推荐绑定自定义域名后再用 Access 保护。
 - 报告使用 Tailwind CDN + lightweight-charts CDN，其余全部内嵌。
-- 本地仅可预览（不部署）：先加载 .env token 后运行 `npm run dev`
-- 非主分支 push 时，默认会用 preview 版本（可获得预览 URL，不影响生产）。
+- 本地预览（模拟 Workers 静态服务）：`npm run dev`（先加载 .env token）。
+- 你可以随时在 Cloudflare Dashboard 手动上传或管理 Worker。
+
+### 常用命令
+```bash
+python main.py backtest --top 5                 # 生成 index.html（推荐）
+python main.py backtest --top 5 --output report.html
+python main.py resolve --missing-only          # 补全缺失 ticker（通常自动）
+```
+
+**Workers 部署相关**：
+```powershell
+# 加载 .env 中的 token 并部署
+Get-Content .env | ForEach-Object { if ($_ -match '^(CLOUDFLARE_[^=]+)=(.*)$') { $env:($matches[1]) = $matches[2] } }; npm run deploy
+
+# 本地预览
+npm run dev
+```
+
+**IB 要求**：必须启动并登录 IB Gateway/TWS（Live 推荐 `--port 4001`；Paper 用 4002）。价格数据增量更新依赖 IB。
+
+**并行加速**：默认使用 4 个 IB 连接（`--num-connections 4`），可显式调小。
 
 ### 常用命令
 ```bash
