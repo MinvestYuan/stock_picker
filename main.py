@@ -85,8 +85,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def _load_or_update_prices(tickers, args, cache_file, duration=None):
-    """Russell 命令统一价格加载逻辑：加载缓存 + 增量更新所有 ticker。
-    现在强制始终从 IB Gateway 下载最新数据并缓存（不再支持跳过）。"""
+    """Russell 命令统一价格加载逻辑：加载缓存 + 按需增量更新所有 ticker。
+    增量决策直接追平“最近一个交易日”的数据（无冷却、无固定新鲜度天数检查）。"""
     price_map = {}
     if args.use_cache and cache_file.exists():
         price_map = load_price_cache(cache_file) or {}
@@ -95,7 +95,7 @@ def _load_or_update_prices(tickers, args, cache_file, duration=None):
             if max_age is not None and max_age > 7:
                 print(f"[info] 缓存中最新的数据已 {max_age} 天未更新，将进行增量刷新", file=sys.stderr)
 
-    print(f"[info] 正在从 IB Gateway 增量更新价格数据（目标 {len(tickers)} 只股票）...", file=sys.stderr)
+    print(f"[info] 正在从 IB Gateway 按需增量更新到最近一个交易日的数据（目标 {len(tickers)} 只股票）...", file=sys.stderr)
     num_conn = getattr(args, "num_connections", 4)
     ib = None
     if num_conn <= 1:
