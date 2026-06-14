@@ -13,7 +13,7 @@ $hook = @"
 #!/bin/sh
 
 # Post-commit hook for stock_picker repo.
-# Automatically pushes only index.html to the Minvest remote (git@github.com:HaominYuan/Minvest.git)
+# Automatically pushes only index.html to the Minvest remote (git@github.com:MinvestYuan/Minvest.git)
 # whenever index.html is part of the commit.
 # This keeps the Minvest repo containing ONLY index.html.
 
@@ -36,7 +36,7 @@ if git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -q index.html; then
   git checkout "$CURRENT_BRANCH"
   git branch -D minvest-deploy
   
-  echo "✅ Successfully pushed index.html to Minvest (https://github.com/HaominYuan/Minvest)"
+  echo "✅ Successfully pushed index.html to Minvest (https://github.com/MinvestYuan/Minvest)"
 else
   echo "(index.html not changed, skipping auto-push to Minvest)"
 fi
@@ -49,4 +49,4 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 Write-Output "✅ Minvest post-commit hook installed at $hookFile"
 Write-Output "Now every commit touching index.html will auto-update the public Minvest repo."
 Write-Output ""
-Write-Output "Make sure you have the remote: git remote add minvest git@github.com:HaominYuan/Minvest.git (if not already)"
+Write-Output "Make sure you have the remote: git remote add minvest git@github.com:MinvestYuan/Minvest.git (if not already)"

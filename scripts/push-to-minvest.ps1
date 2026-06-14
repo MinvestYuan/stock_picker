@@ -30,4 +30,4 @@ git push minvest minvest-deploy:main --force
 git checkout $branch
 git branch -D minvest-deploy
 
-Write-Host "✅ Successfully pushed index.html to Minvest (git@github.com:HaominYuan/Minvest.git)"
+Write-Host "✅ Successfully pushed index.html to Minvest (git@github.com:MinvestYuan/Minvest.git)"

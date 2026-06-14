@@ -55,10 +55,10 @@ GitHub 仅用于存放代码和部署静态报告。
 
 2. GitHub Pages 设置（只需设置一次）：
    - 这个仓库（stock_picker）是**隐私项目**，包含完整源码。
-   - 公开部署仓库是 **Minvest** (https://github.com/HaominYuan/Minvest) ，只包含 index.html。
+   - 公开部署仓库是 **Minvest** (https://github.com/MinvestYuan/Minvest) ，只包含 index.html。
    - 在本仓库（stock_picker）中添加 Minvest 作为第二个 remote（只需一次）：
      ```powershell
-     git remote add minvest git@github.com:HaominYuan/Minvest.git
+     git remote add minvest git@github.com:MinvestYuan/Minvest.git
      ```
    - **自动推送**（推荐）：安装 post-commit hook 后，每次你 `git commit` 包含 index.html 时，会**自动**只推送 index.html 到 Minvest 仓库。
      - 最简单方式：运行仓库里提供的安装脚本（推荐）：
@@ -71,7 +71,7 @@ GitHub 仅用于存放代码和部署静态报告。
      - Source: Deploy from a branch
      - Branch: **main**
      - Folder: **/ (root)**
-   - 报告将部署到 `https://haominyuan.github.io/Minvest/`
+   - 报告将部署到 `https://minvestyuan.github.io/Minvest/`
 
 **提示**：整个过程都在 stock_picker 文件夹内完成，不需要创建第二个本地文件夹。Minvest 远程仓库只保留 index.html 的历史。Hook 会在你提交包含 index.html 的 commit 时自动触发。
 
