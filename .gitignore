@@ -122,18 +122,5 @@ cache/
 # Raw N-PORT XML downloads (large, regeneratable)
 nport_xmls/
 
-# wrangler / Cloudflare build files (local only)
-.wrangler
-.dev.vars*
-!.dev.vars.example
-
-# Cloudflare token (for local reference only, never commit real values)
-# For Git CI builds: set CLOUDFLARE_API_TOKEN as a SECRET in dashboard Builds settings
-# (all builds will use the token you have in your local .env)
-.env
-.env.local
-.env.*
-!.env.example
-
-# Node.js / Wrangler deployment tooling (package.json + lockfile are committed)
+# Node / build artifacts (if any local tools used in future)
 node_modules/

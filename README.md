@@ -42,69 +42,29 @@ python main.py backtest --top 5
 - 输出：`index.html`（单文件静态报告，内嵌全部数据 + TradingView 轻量图表 + 年份过滤 + 详细月度持仓卡片）
 - 报告完全离线可用
 
-### 部署（手动使用 Cloudflare / Wrangler）
+### 部署到 GitHub Pages（静态托管）
 
-GitHub 现在**仅用于存放代码**，不再用于自动部署。  
-所有部署都通过 Cloudflare Workers + wrangler CLI 手动完成（使用你本地的 `.env` 中的 token）。
+GitHub 仅用于存放代码和部署静态报告。
 
-1. 生成报告：
-   ```powershell
-   python main.py backtest --top 5
+1. 生成 `index.html` 后提交到仓库（推荐直接用本仓库或单独的 report 仓库）：
+   ```bash
+   git add index.html
+   git commit -m "Update Minvest report"
+   git push
    ```
 
-2. 部署到 Cloudflare Worker：
-   - 确保 `.env` 中有你的最新 `CLOUDFLARE_API_TOKEN`（和可选的 `CLOUDFLARE_ACCOUNT_ID`）。
-   - 运行：
-     ```powershell
-     # 加载 token 并部署（仅上传 index.html，因为有 .assetsignore）
-     Get-Content .env | ForEach-Object { if ($_ -match '^(CLOUDFLARE_[^=]+)=(.*)$') { $env:($matches[1]) = $matches[2] } }; npm run deploy
-     ```
-   - 或者直接：
-     ```powershell
-     npx wrangler deploy
-     ```
-   - 部署后访问：`https://minvest.<你的子域>.workers.dev`
-
-3. **重要：取消 GitHub 自动部署集成（避免 build token 问题）**
-   - 登录 Cloudflare Dashboard → Workers & Pages → 找到 `minvest` Worker。
-   - Settings → Builds。
-   - 如果有 Git 仓库连接，点击 **Disconnect** 或 **Manage** → 断开 Git 集成。
-   - 或者在 Builds 设置中清空 Build command / Deploy command（改成不自动部署）。
-   - 以后 push 到 GitHub 不会再触发构建/部署。
-
-4. Cloudflare Access（仅自己可见，强烈推荐）：
-   - Zero Trust → Access → Applications → Add an application（选 Self-hosted 或 Worker 相关）。
-   - 绑定 Worker URL（`minvest.*.workers.dev` 或自定义域名）。
-   - Policy：Allow + Include Email（你的邮箱）。
-   - 访问时强制 Cloudflare 登录验证。
+2. GitHub Pages 设置（只需设置一次）：
+   - 进入仓库 Settings → Pages
+   - Source: Deploy from a branch
+   - Branch: **main**（或你的主分支）
+   - Folder: **/ (root)**
+   - 保存后，等待几分钟，报告将自动部署到 `https://<你的用户名>.github.io/<仓库名>/` （例如 `https://haominyuan.github.io/stock_picker/`）
 
 **提示**：
-- 项目中已添加 `.assetsignore`，部署时只会包含 `index.html`（干净的报告站点，不暴露 Python 源码等文件）。
-- `.env` 仅本地使用（已加入 .gitignore，绝不会提交到 GitHub）。部署时通过加载 .env 使用 token。
-- 推荐绑定自定义域名后再用 Access 保护。
+- 报告完全静态，离线可用，支持自定义域名（在 Pages 设置中添加）。
+- 每次更新报告后 push，GitHub Pages 会自动重新部署。
+- 如果想用 gh-pages 分支或其他方式，可自行配置。
 - 报告使用 Tailwind CDN + lightweight-charts CDN，其余全部内嵌。
-- 本地预览（模拟 Workers 静态服务）：`npm run dev`（先加载 .env token）。
-- 你可以随时在 Cloudflare Dashboard 手动上传或管理 Worker。
-
-### 常用命令
-```bash
-python main.py backtest --top 5                 # 生成 index.html（推荐）
-python main.py backtest --top 5 --output report.html
-python main.py resolve --missing-only          # 补全缺失 ticker（通常自动）
-```
-
-**Workers 部署相关**：
-```powershell
-# 加载 .env 中的 token 并部署
-Get-Content .env | ForEach-Object { if ($_ -match '^(CLOUDFLARE_[^=]+)=(.*)$') { $env:($matches[1]) = $matches[2] } }; npm run deploy
-
-# 本地预览
-npm run dev
-```
-
-**IB 要求**：必须启动并登录 IB Gateway/TWS（Live 推荐 `--port 4001`；Paper 用 4002）。价格数据增量更新依赖 IB。
-
-**并行加速**：默认使用 4 个 IB 连接（`--num-connections 4`），可显式调小。
 
 ### 常用命令
 ```bash
