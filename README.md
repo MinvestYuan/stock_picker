@@ -61,30 +61,11 @@ GitHub 仅用于存放代码和部署静态报告。
      git remote add minvest git@github.com:HaominYuan/Minvest.git
      ```
    - **自动推送**（推荐）：安装 post-commit hook 后，每次你 `git commit` 包含 index.html 时，会**自动**只推送 index.html 到 Minvest 仓库。
-     - 安装 hook（在 stock_picker 目录执行一次）：
+     - 最简单方式：运行仓库里提供的安装脚本（推荐）：
        ```powershell
-       # 创建 hooks 目录（如果没有）
-       mkdir -p .git/hooks
-       # 下载或创建 post-commit hook（内容见下面）
-       # 或者复制下面的脚本内容到 .git/hooks/post-commit
+       pwsh scripts/setup-minvest-hook.ps1
        ```
-     - post-commit hook 内容（保存为 .git/hooks/post-commit ，并确保可执行）：
-       ```sh
-       #!/bin/sh
-       if git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -q index.html; then
-         echo "index.html changed, auto-pushing to Minvest..."
-         CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-         git checkout --orphan minvest-deploy
-         git rm -rf . > /dev/null 2>&1 || true
-         git checkout "$CURRENT_BRANCH" -- index.html
-         git add index.html
-         git commit -m "Update Minvest report (auto from stock_picker)"
-         git push minvest minvest-deploy:main --force
-         git checkout "$CURRENT_BRANCH"
-         git branch -D minvest-deploy
-         echo "✅ Pushed index.html to Minvest"
-       fi
-       ```
+     - 这会自动创建 .git/hooks/post-commit ，以后每次 commit 包含 index.html 时自动推送。
      - 然后 `chmod +x .git/hooks/post-commit` （在 Git Bash）或在 Windows 上确保 Git 可以运行它。
    - 在 Minvest 仓库 Settings → Pages:
      - Source: Deploy from a branch
