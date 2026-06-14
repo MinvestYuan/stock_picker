@@ -56,19 +56,43 @@ GitHub 仅用于存放代码和部署静态报告。
 2. GitHub Pages 设置（只需设置一次）：
    - 这个仓库（stock_picker）是**隐私项目**，包含完整源码。
    - 公开部署仓库是 **Minvest** (https://github.com/HaominYuan/Minvest) ，只包含 index.html。
-   - 流程：生成 index.html 后，复制到 Minvest 仓库根目录，然后：
-     ```bash
-     cd ../Minvest   # 假设 Minvest 克隆在同级目录
-     cp ../stock_picker/index.html .
-     git add index.html
-     git commit -m "Update Minvest report"
-     git push
+   - 在本仓库（stock_picker）中添加 Minvest 作为第二个 remote（只需一次）：
+     ```powershell
+     git remote add minvest git@github.com:HaominYuan/Minvest.git
      ```
+   - **自动推送**（推荐）：安装 post-commit hook 后，每次你 `git commit` 包含 index.html 时，会**自动**只推送 index.html 到 Minvest 仓库。
+     - 安装 hook（在 stock_picker 目录执行一次）：
+       ```powershell
+       # 创建 hooks 目录（如果没有）
+       mkdir -p .git/hooks
+       # 下载或创建 post-commit hook（内容见下面）
+       # 或者复制下面的脚本内容到 .git/hooks/post-commit
+       ```
+     - post-commit hook 内容（保存为 .git/hooks/post-commit ，并确保可执行）：
+       ```sh
+       #!/bin/sh
+       if git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -q index.html; then
+         echo "index.html changed, auto-pushing to Minvest..."
+         CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+         git checkout --orphan minvest-deploy
+         git rm -rf . > /dev/null 2>&1 || true
+         git checkout "$CURRENT_BRANCH" -- index.html
+         git add index.html
+         git commit -m "Update Minvest report (auto from stock_picker)"
+         git push minvest minvest-deploy:main --force
+         git checkout "$CURRENT_BRANCH"
+         git branch -D minvest-deploy
+         echo "✅ Pushed index.html to Minvest"
+       fi
+       ```
+     - 然后 `chmod +x .git/hooks/post-commit` （在 Git Bash）或在 Windows 上确保 Git 可以运行它。
    - 在 Minvest 仓库 Settings → Pages:
      - Source: Deploy from a branch
      - Branch: **main**
      - Folder: **/ (root)**
    - 报告将部署到 `https://haominyuan.github.io/Minvest/`
+
+**提示**：整个过程都在 stock_picker 文件夹内完成，不需要创建第二个本地文件夹。Minvest 远程仓库只保留 index.html 的历史。Hook 会在你提交包含 index.html 的 commit 时自动触发。
 
 **提示**：
 - 报告完全静态，离线可用，支持自定义域名（在 Pages 设置中添加）。
