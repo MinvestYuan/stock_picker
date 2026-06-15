@@ -248,13 +248,22 @@ def _drawdown_from_cumulative(cum_returns: pd.Series) -> pd.Series:
 
 def _kpi_text_color(label: str, value: str) -> str:
     if label in ("最大回撤", "最差月份") or value.startswith("-"):
-        return "text-rose-600"
+        return "val-neg"
     if label in ("夏普比率", "索提诺比率", "Calmar 比率", "盈亏比"):
         try:
-            return "text-emerald-600" if float(value.replace("%", "")) >= 1 else "text-rose-600"
+            return "val-pos" if float(value.replace("%", "")) >= 1 else "val-neg"
         except ValueError:
             pass
-    return "text-emerald-600"
+    return "val-pos"
+
+
+def _write_metric_card(f, label: str, value: str, text_color: str) -> None:
+    f.write(f"""
+                    <div class="metric-card">
+                        <div class="metric-label">{label}</div>
+                        <div class="metric-value {text_color}">{value}</div>
+                    </div>
+""")
 
 
 def generate_backtest_html(
@@ -361,10 +370,10 @@ def generate_backtest_html(
 
     # === 图表准备 ===
     colors_map = {
-        "策略": "#22c55e",  # green
-        benchmark: "#3b82f6",  # blue
+        "策略": "#047857",
+        benchmark: "#2563eb",
     }
-    extra_colors = ["#f59e0b", "#8b5cf6", "#ec4899", "#14b8a6"]
+    extra_colors = ["#d97706", "#7c3aed", "#db2777", "#0d9488"]
     for i, bm in enumerate(extra_benchmarks):
         colors_map[bm] = extra_colors[i % len(extra_colors)]
 
@@ -479,73 +488,214 @@ def generate_backtest_html(
     <script src="{tailwind}"></script>
     <script src="{tv_charts}"></script>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;display=swap');
-        body {{ font-family: 'Inter', ui-sans-serif, system-ui, sans-serif; background: #fafafa; }}
-        .font-display {{ font-family: 'Inter', system-ui, sans-serif; font-weight: 600; letter-spacing: -.025em; }}
-        .kpi-card {{ transition: all 0.1s ease; }}
-        .kpi-card:hover {{ box-shadow: 0 1px 3px rgb(0 0 0 / 0.08); transform: translateY(-1px); }}
-        .plot-container {{ border-radius: 8px; border: 1px solid #e5e7eb; background: white; box-sizing: border-box; }}
-        .section-title {{ font-size: 0.875rem; font-weight: 600; color: #171717; letter-spacing: -.01em; }}
-        table {{ border-collapse: separate; border-spacing: 0; font-size: 0.8125rem; }}
-        th, td {{ border-bottom: 1px solid #f4f4f5; padding-top: 0.375rem; padding-bottom: 0.375rem; }}
-        th {{ color: #71717a; font-weight: 500; text-transform: uppercase; font-size: 0.6875rem; letter-spacing: .02em; }}
-        .month-card {{ font-size: 0.8125rem; line-height: 1.2; border: 1px solid #e5e7eb; background: white; }}
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap');
+        :root {{
+            --bg: #f4f4f5;
+            --surface: #ffffff;
+            --surface-muted: #fafafa;
+            --border: rgba(24, 24, 27, 0.08);
+            --border-strong: rgba(24, 24, 27, 0.12);
+            --text: #18181b;
+            --text-muted: #71717a;
+            --text-subtle: #a1a1aa;
+            --pos: #047857;
+            --neg: #be123c;
+            --accent: #18181b;
+            --shadow-sm: 0 1px 2px rgba(0,0,0,.04);
+            --shadow-md: 0 4px 24px rgba(0,0,0,.06);
+            --radius: 14px;
+        }}
+        * {{ box-sizing: border-box; }}
+        body {{
+            font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+            background: linear-gradient(180deg, #fafafa 0%, var(--bg) 100%);
+            color: var(--text);
+            min-height: 100vh;
+        }}
+        .font-display {{ font-weight: 700; letter-spacing: -0.03em; }}
+        .page {{ max-width: 1120px; margin: 0 auto; padding: 2.5rem 2rem 4rem; }}
+        .panel {{
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow-sm);
+        }}
+        .panel-padded {{ padding: 1.5rem; }}
+        .section-block {{ margin-bottom: 1.75rem; }}
+        .section-head {{
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 1rem; gap: 1rem;
+        }}
+        .section-title {{
+            font-size: 0.8125rem; font-weight: 600; color: var(--text);
+            letter-spacing: -0.01em;
+        }}
+        .section-title::before {{
+            content: ''; display: inline-block; width: 3px; height: 14px;
+            background: var(--accent); border-radius: 2px;
+            margin-right: 0.5rem; vertical-align: -2px;
+        }}
+        .section-subtitle {{
+            font-size: 0.6875rem; font-weight: 600; color: var(--text-subtle);
+            text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.75rem;
+        }}
+        .date-badge {{
+            font-size: 0.75rem; color: var(--text-muted); font-weight: 500;
+            background: var(--surface-muted); border: 1px solid var(--border);
+            padding: 0.375rem 0.75rem; border-radius: 999px; white-space: nowrap;
+        }}
+        .metric-grid {{
+            display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.75rem;
+        }}
+        @media (min-width: 768px) {{ .metric-grid {{ grid-template-columns: repeat(3, 1fr); }} }}
+        .metric-card {{
+            background: var(--surface-muted);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1rem 1.125rem;
+            transition: border-color 0.15s ease, box-shadow 0.15s ease;
+        }}
+        .metric-card:hover {{
+            border-color: var(--border-strong);
+            box-shadow: var(--shadow-sm);
+        }}
+        .metric-label {{
+            font-size: 0.6875rem; font-weight: 600; color: var(--text-subtle);
+            text-transform: uppercase; letter-spacing: 0.06em;
+        }}
+        .metric-value {{
+            margin-top: 0.5rem;
+            font-size: 1.625rem; font-weight: 700;
+            font-variant-numeric: tabular-nums;
+            letter-spacing: -0.03em; line-height: 1;
+        }}
+        .metric-divider {{
+            height: 1px; background: var(--border);
+            margin: 1.25rem 0;
+        }}
+        .val-pos {{ color: var(--pos); }}
+        .val-neg {{ color: var(--neg); }}
+        .val-neutral {{ color: var(--text); }}
+        .data-table {{ width: 100%; border-collapse: collapse; font-size: 0.8125rem; }}
+        .data-table th {{
+            text-align: left; padding: 0.625rem 1rem;
+            font-size: 0.625rem; font-weight: 600; color: var(--text-subtle);
+            text-transform: uppercase; letter-spacing: 0.06em;
+            border-bottom: 1px solid var(--border);
+            background: var(--surface-muted);
+        }}
+        .data-table th:not(:first-child) {{ text-align: right; }}
+        .data-table td {{
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid var(--border);
+            font-variant-numeric: tabular-nums;
+        }}
+        .data-table td:not(:first-child) {{ text-align: right; }}
+        .data-table tr:last-child td {{ border-bottom: none; }}
+        .data-table tbody tr:hover {{ background: #fafafa; }}
+        .data-table .row-highlight {{ background: rgba(4, 120, 87, 0.04); }}
+        .data-table .row-highlight:hover {{ background: rgba(4, 120, 87, 0.07); }}
+        .legend-dot {{
+            display: inline-block; width: 8px; height: 8px;
+            border-radius: 50%; margin-right: 0.5rem; vertical-align: middle;
+        }}
+        .chart-panel {{
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow-sm);
+            padding: 1rem;
+        }}
+        .mtd-badge {{
+            font-size: 0.875rem; font-weight: 600;
+            font-variant-numeric: tabular-nums;
+        }}
+        .mtd-live-tag {{
+            font-size: 0.625rem; color: var(--text-subtle);
+            font-weight: 500; margin-left: 0.25rem;
+        }}
+        .year-select {{
+            appearance: none;
+            background: var(--surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E") no-repeat right 0.75rem center;
+            border: 1px solid var(--border-strong);
+            border-radius: 10px;
+            padding: 0.5rem 2rem 0.5rem 0.875rem;
+            font-size: 0.8125rem; font-weight: 500; color: var(--text);
+            cursor: pointer; transition: border-color 0.15s ease;
+        }}
+        .year-select:focus {{ outline: none; border-color: var(--accent); }}
+        .month-card {{
+            font-size: 0.8125rem; line-height: 1.3;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 0.875rem;
+            transition: border-color 0.15s ease, box-shadow 0.15s ease;
+        }}
+        .month-card:hover {{ border-color: var(--border-strong); box-shadow: var(--shadow-sm); }}
         #monthly-cards .month-card {{ display: none; }}
-        .num {{ font-variant-numeric: tabular-nums; }}
-        .card {{ background: white; border: 1px solid #e5e7eb; border-radius: 6px; }}
+        .month-card table {{ width: 100%; border-collapse: collapse; font-size: 0.75rem; margin-top: 0.5rem; }}
+        .month-card th {{
+            text-align: left; padding: 0.375rem 0.5rem;
+            font-size: 0.625rem; font-weight: 600; color: var(--text-subtle);
+            text-transform: uppercase; letter-spacing: 0.04em;
+            background: var(--surface-muted); border-radius: 4px;
+        }}
+        .month-card th:not(:first-child) {{ text-align: right; }}
+        .month-card td {{ padding: 0.375rem 0.5rem; border-top: 1px solid var(--border); }}
+        .month-card td:not(:first-child) {{ text-align: right; font-variant-numeric: tabular-nums; }}
+        .ret-badge {{
+            font-size: 0.625rem; font-weight: 600;
+            padding: 0.125rem 0.5rem; border-radius: 999px;
+        }}
+        .ret-badge-pos {{ background: rgba(4, 120, 87, 0.1); color: var(--pos); }}
+        .ret-badge-neg {{ background: rgba(190, 18, 60, 0.08); color: var(--neg); }}
     </style>
 </head>
-<body class="bg-[#fafafa] text-[#111] antialiased">
-    <div class="max-w-[1080px] mx-auto px-8 pt-10 pb-16">
-        <!-- Claude-inspired clean header -->
-        <div class="mb-6">
-            <h1 class="font-display text-[28px] font-semibold tracking-[-0.03em]">Minvest</h1>
-            <p class="text-[#666] mt-1 text-[13px]">{date_range}</p>
-        </div>
+<body class="antialiased">
+    <div class="page">
+        <header class="flex items-end justify-between gap-4 mb-8">
+            <div>
+                <p class="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-400 mb-1.5">Portfolio Report</p>
+                <h1 class="font-display text-[2rem] text-zinc-900 leading-none">Minvest</h1>
+            </div>
+            <span class="date-badge">{date_range}</span>
+        </header>
 
-        <!-- KPI Cards -->
-        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-3 gap-4 mb-4">
+        <section class="panel panel-padded section-block">
+            <div class="section-subtitle">核心指标</div>
+            <div class="metric-grid">
 """)
 
         for label, value in primary_kpis:
-            text_color = _kpi_text_color(label, value)
-            f.write(f"""
-            <div class="kpi-card bg-white border border-[#e5e7eb] rounded-xl p-4">
-                <div class="text-[10px] font-medium text-[#666] tracking-[0.5px]">{label}</div>
-                <div class="mt-1.5 text-[28px] font-semibold tabular-nums tracking-tighter {text_color} leading-none">{value}</div>
-            </div>
-""")
+            _write_metric_card(f, label, value, _kpi_text_color(label, value))
 
         f.write("""
-        </div>
-
-        <!-- Secondary Risk Metrics -->
-        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-3 gap-4 mb-6">
+            </div>
+            <div class="metric-divider"></div>
+            <div class="section-subtitle">风险指标</div>
+            <div class="metric-grid">
 """)
         for label, value in secondary_kpis:
-            text_color = _kpi_text_color(label, value)
-            f.write(f"""
-            <div class="kpi-card bg-white border border-[#e5e7eb] rounded-xl p-3">
-                <div class="text-[10px] font-medium text-[#666] tracking-[0.5px]">{label}</div>
-                <div class="mt-1 text-xl font-semibold tabular-nums tracking-tighter {text_color} leading-none">{value}</div>
-            </div>
-""")
+            _write_metric_card(f, label, value, _kpi_text_color(label, value))
         f.write("""
-        </div>
+            </div>
+        </section>
 
-        <!-- Benchmark Comparison -->
-        <div class="mb-6">
-            <div class="section-title mb-3">策略 vs 基准对比</div>
-            <div class="card overflow-hidden">
-                <table class="w-full">
+        <section class="section-block">
+            <div class="section-head">
+                <div class="section-title">策略 vs 基准对比</div>
+            </div>
+            <div class="panel overflow-hidden">
+                <table class="data-table">
                     <thead>
-                        <tr class="bg-[#f9fafb]">
-                            <th class="text-left px-4 py-2">名称</th>
-                            <th class="text-right px-4 py-2 tabular-nums">累计回报</th>
-                            <th class="text-right px-4 py-2 tabular-nums">年化收益</th>
-                            <th class="text-right px-4 py-2 tabular-nums">最大回撤</th>
-                            <th class="text-right px-4 py-2 tabular-nums">夏普</th>
-                            <th class="text-right px-4 py-2 tabular-nums">胜率</th>
+                        <tr>
+                            <th>名称</th>
+                            <th>累计回报</th>
+                            <th>年化收益</th>
+                            <th>最大回撤</th>
+                            <th>夏普</th>
+                            <th>胜率</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -554,153 +704,143 @@ def generate_backtest_html(
             if name not in all_metrics:
                 continue
             m = all_metrics[name]
-            row_bg = "bg-emerald-50/50" if name == "策略" else ""
+            row_cls = "row-highlight" if name == "策略" else ""
             dot_color = colors_map.get(name, "#6b7280")
-            ret_cls = "text-emerald-600" if m["total_return"] >= 0 else "text-rose-600"
-            cagr_cls = "text-emerald-600" if m["cagr"] >= 0 else "text-rose-600"
+            ret_cls = "val-pos" if m["total_return"] >= 0 else "val-neg"
+            cagr_cls = "val-pos" if m["cagr"] >= 0 else "val-neg"
             f.write(f"""
-                        <tr class="hover:bg-zinc-50 {row_bg}">
-                            <td class="px-4 py-2 font-medium">
-                                <span class="inline-block w-2 h-2 rounded-full mr-2 align-middle" style="background:{dot_color}"></span>{name}
+                        <tr class="{row_cls}">
+                            <td class="font-medium">
+                                <span class="legend-dot" style="background:{dot_color}"></span>{name}
                             </td>
-                            <td class="px-4 py-2 text-right tabular-nums {ret_cls}">{fmt_pct(m["total_return"])}</td>
-                            <td class="px-4 py-2 text-right tabular-nums {cagr_cls}">{fmt_pct(m["cagr"])}</td>
-                            <td class="px-4 py-2 text-right tabular-nums text-rose-600">{fmt_pct(m["max_drawdown"])}</td>
-                            <td class="px-4 py-2 text-right tabular-nums">{m["sharpe"]:.2f}</td>
-                            <td class="px-4 py-2 text-right tabular-nums">{m["win_rate"] * 100:.0f}%</td>
+                            <td class="{ret_cls}">{fmt_pct(m["total_return"])}</td>
+                            <td class="{cagr_cls}">{fmt_pct(m["cagr"])}</td>
+                            <td class="val-neg">{fmt_pct(m["max_drawdown"])}</td>
+                            <td class="val-neutral">{m["sharpe"]:.2f}</td>
+                            <td class="val-neutral">{m["win_rate"] * 100:.0f}%</td>
                         </tr>
 """)
         f.write("""
                     </tbody>
                 </table>
             </div>
-        </div>
+        </section>
 """)
 
-        # MTD section with proper python f-interp for the initial portfolio_mtd value (overridden by live JS)
         mtd_val = portfolio_mtd * 100
-        mtd_color = "text-emerald-600" if mtd_val >= 0 else "text-rose-600"
+        mtd_color = "val-pos" if mtd_val >= 0 else "val-neg"
         f.write(f"""
-        <!-- 本月收益率 (MTD 走势 + 实时组合值) -->
-        <div class="mb-4">
-            <div class="flex items-center justify-between mb-3">
+        <section class="section-block">
+            <div class="section-head">
                 <div class="section-title">本月收益率</div>
-                <div id="mtd-live" class="text-sm font-medium text-right tabular-nums">
-                    <span class="{mtd_color}">{mtd_val:.1f}%</span> <span class="text-[9px] text-[#888]">(实时)</span>
+                <div id="mtd-live" class="mtd-badge">
+                    <span class="{mtd_color}">{mtd_val:.1f}%</span><span class="mtd-live-tag">实时</span>
                 </div>
             </div>
-            <div class="plot-container p-3">
+            <div class="chart-panel">
                 <div id="tv-latest-kchart" style="width: 100%; height: 260px;"></div>
             </div>
-        </div>
+        </section>
 
-        <!-- Main Equity Curve -->
-        <div class="mb-4">
-            <div class="flex items-baseline justify-between mb-3">
+        <section class="section-block">
+            <div class="section-head">
                 <div class="section-title">累计权益曲线</div>
             </div>
-            <div class="plot-container p-3" style="height: 380px;">
+            <div class="chart-panel" style="height: 400px;">
                 <div id="tv-equity-chart" style="width: 100%; height: 100%;"></div>
             </div>
-        </div>
+        </section>
 
-        <!-- Risk charts - clean side-by-side like Claude interfaces -->
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-4">
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-5 section-block">
             <div>
-                <div class="section-title mb-2">最大回撤</div>
-                <div class="plot-container p-3" style="height: 240px;">
+                <div class="section-title mb-3">最大回撤</div>
+                <div class="chart-panel" style="height: 260px;">
                     <div id="tv-drawdown-chart" style="width: 100%; height: 100%;"></div>
                 </div>
             </div>
             <div>
-                <div class="section-title mb-2">回撤分布</div>
-                <div class="plot-container p-3" style="height: 240px;">
+                <div class="section-title mb-3">回撤分布</div>
+                <div class="chart-panel" style="height: 260px;">
                     <div id="tv-dd-dist-chart" style="width: 100%; height: 100%;"></div>
                 </div>
             </div>
         </div>
 
-        <!-- Monthly Returns -->
-        <div class="mb-4">
-            <div class="section-title mb-3">月度回报分布</div>
-            <div class="plot-container p-3" style="height: 240px;">
+        <section class="section-block">
+            <div class="section-head">
+                <div class="section-title">月度回报分布</div>
+            </div>
+            <div class="chart-panel" style="height: 260px;">
                 <div id="tv-monthly-chart" style="width: 100%; height: 100%;"></div>
             </div>
-        </div>
+        </section>
 
-        <!-- Holdings -->
-        <div class="pt-2 mb-4">
-            <div class="flex items-center justify-between mb-3 px-1">
-                <div class="section-title">年度 & 月度持仓 (Minvest)</div>
+        <section class="section-block">
+            <div class="section-head">
+                <div class="section-title">年度 & 月度持仓</div>
             </div>
-
-            <!-- Year Dropdown for Annual + Year Return -->
-            <div class="mb-5 flex items-center gap-3">
-                <label class="text-sm font-medium text-[#555]">年份</label>
-                <select id="year-select" class="border border-[#e5e7eb] rounded-md px-3 py-1 text-sm bg-white focus:outline-none focus:border-[#d4d4d8]" onchange="filterByYear()">
+            <div class="flex items-center gap-3 mb-5">
+                <label class="text-xs font-semibold uppercase tracking-wider text-zinc-400">年份</label>
+                <select id="year-select" class="year-select" onchange="filterByYear()">
 """)
         for y in years:
             sel = ' selected' if y == default_year else ''
             f.write(f'                        <option value="{y}"{sel}>{y}</option>\n')
         f.write("""
                     </select>
-                <div id="year-return-display" class="text-sm font-medium text-emerald-600 ml-2 min-w-[100px]"></div>
+                <div id="year-return-display" class="text-sm font-semibold min-w-[100px]"></div>
             </div>
-
-            <div id="monthly-cards" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            <div id="monthly-cards" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
 """)
         for m in monthly_data:
             ret = m['monthly_return']
-            ret_class = "bg-emerald-100 text-emerald-700" if ret > 0 else "bg-rose-100 text-rose-700"
+            ret_class = "ret-badge-pos" if ret > 0 else "ret-badge-neg"
             ret_str = f"{ret*100:+.2f}%"
             month_details = details_by_month.get(m['month'], [])
-            # Build table for this month's holdings (one ticker per row, columns: 标的, 买入价, 卖出价, 回报)
             if month_details:
                 table_rows = ''
                 for d in month_details:
                     t_ret = d['monthly_return']
-                    t_ret_class = "text-emerald-600" if t_ret > 0 else "text-rose-600"
+                    t_ret_class = "val-pos" if t_ret > 0 else "val-neg"
                     t_ret_str = f"{t_ret*100:+.2f}%"
                     table_rows += f'''
-                        <tr class="border-t border-zinc-200 hover:bg-zinc-50">
-                            <td class="px-2 py-1 font-mono font-semibold text-[#111]">{d['ticker']}</td>
-                            <td class="px-2 py-1 text-right tabular-nums">{d['buy_price']:.2f}</td>
-                            <td class="px-2 py-1 text-right tabular-nums">{d['sell_price']:.2f}</td>
-                            <td class="px-2 py-1 text-right tabular-nums {t_ret_class}">{t_ret_str}</td>
+                        <tr>
+                            <td class="font-mono font-semibold">{d['ticker']}</td>
+                            <td>{d['buy_price']:.2f}</td>
+                            <td>{d['sell_price']:.2f}</td>
+                            <td class="{t_ret_class}">{t_ret_str}</td>
                         </tr>
                     '''
                 table_html = f'''
-                    <table class="w-full text-xs border-collapse mt-1.5">
+                    <table>
                         <thead>
-                            <tr class="bg-[#f4f4f5] text-[#666]">
-                                <th class="text-left px-2 py-1 font-semibold">标的</th>
-                                <th class="text-right px-2 py-1 font-semibold tabular-nums">买入价</th>
-                                <th class="text-right px-2 py-1 font-semibold tabular-nums">卖出价</th>
-                                <th class="text-right px-2 py-1 font-semibold tabular-nums">回报</th>
+                            <tr>
+                                <th>标的</th>
+                                <th>买入价</th>
+                                <th>卖出价</th>
+                                <th>回报</th>
                             </tr>
                         </thead>
-                        <tbody>
-                            {table_rows}
-                        </tbody>
+                        <tbody>{table_rows}</tbody>
                     </table>
                 '''
             else:
-                table_html = '<div class="text-[#888] text-xs mt-1">现金持仓</div>'
+                table_html = '<div class="text-xs text-zinc-400 mt-1">现金持仓</div>'
             f.write(f"""
-                <div class="month-card card rounded-lg p-3" data-year="{m['year']}" data-month="{m['month']}">
-                    <div class="flex justify-between items-start mb-1.5">
+                <div class="month-card" data-year="{m['year']}" data-month="{m['month']}">
+                    <div class="flex justify-between items-start mb-1">
                         <div>
-                            <div class="font-semibold text-[13px]">{m['month']}</div>
-                            <div class="text-[10px] text-[#777]">{m['buy_date']} → {m['sell_date']}</div>
+                            <div class="font-semibold text-[13px] tracking-tight">{m['month']}</div>
+                            <div class="text-[10px] text-zinc-400 mt-0.5">{m['buy_date']} → {m['sell_date']}</div>
                         </div>
-                        <div class="px-1.5 py-px rounded text-[10px] font-medium {ret_class}">{ret_str}</div>
+                        <div class="ret-badge {ret_class}">{ret_str}</div>
                     </div>
                     {table_html}
                 </div>
 """)
         f.write("""
             </div>
-        </div>
+        </section>
 """)
 
         f.write("""
@@ -717,10 +857,10 @@ def generate_backtest_html(
             const defaultYear = """ + json.dumps(default_year) + """;
 
             const TV_BASE = {
-                layout: { background: { color: '#ffffff' }, textColor: '#374151' },
-                grid: { vertLines: { color: '#f3f4f6' }, horzLines: { color: '#f3f4f6' } },
-                timeScale: { borderColor: '#e5e7eb', timeVisible: false, secondsVisible: false },
-                crosshair: { mode: 0, vertLine: { color: '#d1d5db', width: 1, style: 3 }, horzLine: { color: '#d1d5db', width: 1, style: 3 } },
+                layout: { background: { color: 'transparent' }, textColor: '#71717a', fontSize: 11 },
+                grid: { vertLines: { color: 'rgba(24,24,27,0.04)' }, horzLines: { color: 'rgba(24,24,27,0.04)' } },
+                timeScale: { borderColor: 'rgba(24,24,27,0.08)', timeVisible: false, secondsVisible: false },
+                crosshair: { mode: 0, vertLine: { color: 'rgba(24,24,27,0.15)', width: 1, style: 3 }, horzLine: { color: 'rgba(24,24,27,0.15)', width: 1, style: 3 } },
             };
 
             function createTVChart(container, height, extra = {}) {
@@ -830,8 +970,8 @@ def generate_backtest_html(
                     if (year && annualReturns[year] !== undefined) {
                         const ret = annualReturns[year];
                         const retStr = (ret * 100).toFixed(2) + '%';
-                        const retClass = ret >= 0 ? 'text-emerald-600' : 'text-rose-600';
-                        retDisplay.innerHTML = `<span class="${retClass} font-bold">年收益: ${retStr}</span>`;
+                        const retClass = ret >= 0 ? 'val-pos' : 'val-neg';
+                        retDisplay.innerHTML = `<span class="${retClass}">年收益 ${retStr}</span>`;
                     } else {
                         retDisplay.innerHTML = '';
                     }
@@ -842,7 +982,7 @@ def generate_backtest_html(
             function initTradingViewEquity() {
                 const container = document.getElementById('tv-equity-chart');
                 waitForCharts(() => initMultiLineChart('tv-equity-chart', tvEquityData, {
-                    height: 380,
+                    height: 400,
                     lineWidth: (name) => name === '策略' ? 3 : 2,
                     chartOpts: { rightPriceScale: { scaleMargins: { top: 0.1, bottom: 0.1 } }, legend: { visible: true, position: 'top' } },
                     errorMsg: '累计权益曲线创建出错，请刷新重试。',
@@ -854,13 +994,13 @@ def generate_backtest_html(
             }
 
             function initTradingViewMonthly() {
-                const coloredData = tvMonthlyData.map(d => ({ time: d.time, value: d.value, color: d.value >= 0 ? '#22c55e' : '#ef4444' }));
+                const coloredData = tvMonthlyData.map(d => ({ time: d.time, value: d.value, color: d.value >= 0 ? '#047857' : '#be123c' }));
                 initHistogramChart('tv-monthly-chart', coloredData, { title: '策略月度回报', errorMsg: '月度回报图表创建出错，请刷新。' });
             }
 
             function initTradingViewDDDist() {
                 initHistogramChart('tv-dd-dist-chart', tvDDDistData, {
-                    title: '回撤分布', color: '#ef4444',
+                    title: '回撤分布', color: '#be123c',
                     chartOpts: { timeScale: { ...TV_BASE.timeScale, tickMarkFormatter: (time) => ((time - 100000) / 100).toFixed(1) + '%' } },
                     errorMsg: '回撤分布图表出错。',
                 });
@@ -900,7 +1040,7 @@ def generate_backtest_html(
                         timeScale: { ...TV_BASE.timeScale, rightOffset: 3, barSpacing: 18, minBarWidth: 4 },
                     });
                     if (!chart) return;
-                    const colors = ['#22c55e', '#3b82f6', '#f59e0b', '#8b5cf6', '#ec4899'];
+                    const colors = ['#047857', '#2563eb', '#d97706', '#7c3aed', '#db2777'];
                     const seriesMap = {};
                     latestKMetadata.tickers.forEach((t, i) => {
                         const s = chart.addLineSeries({ color: colors[i % colors.length], lineWidth: 2, title: t });
@@ -915,8 +1055,8 @@ def generate_backtest_html(
                         const el = document.getElementById('mtd-live');
                         if (el) {
                             const pctStr = (avg * 100).toFixed(1);
-                            const numClass = avg >= 0 ? 'text-emerald-600' : 'text-rose-600';
-                            el.innerHTML = `<span class="${numClass}">${pctStr}%</span> <span class="text-[9px] text-[#888]">(实时)</span>`;
+                            const numClass = avg >= 0 ? 'val-pos' : 'val-neg';
+                            el.innerHTML = `<span class="${numClass}">${pctStr}%</span><span class="mtd-live-tag">实时</span>`;
                         }
                     };
                     window.refreshMTD();
