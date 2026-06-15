@@ -22,12 +22,22 @@ def resolve_month_trade_dates(dates: pd.DatetimeIndex, month_str: str) -> tuple[
     return month_dates[0], future_dates[0]
 
 
+def _normalize_ohlc(pseries: pd.DataFrame) -> pd.DataFrame:
+    out = pseries.copy()
+    out.index = pd.to_datetime(out.index).normalize()
+    return out.sort_index()
+
+
 def open_at(pseries: pd.DataFrame, dt: pd.Timestamp) -> float:
     """取指定日期的开盘价；缺失时回退到收盘价。"""
-    row = pseries.loc[dt]
+    s = _normalize_ohlc(pseries)
+    dt = pd.to_datetime(dt).normalize()
+    if dt not in s.index:
+        raise KeyError(dt)
+    row = s.loc[dt]
     if isinstance(row, pd.DataFrame):
         row = row.iloc[0]
-    if "open" in pseries.columns and pd.notna(row.get("open")):
+    if "open" in s.columns and pd.notna(row.get("open")):
         return float(row["open"])
     return float(row["close"])
 
@@ -44,7 +54,12 @@ def backtest_nport_monthly(
     NPORT 持仓月度回测：每个月的 universe 来自 NPORT 持仓
     monthly_universes: {month_str (YYYY-MM): [ticker_list]}
 
-    策略更新（按用户要求）：
+    交易规则（月度换仓）：
+    - 买入日 = 当月首个交易日，买入价 = 当日开盘价
+    - 卖出日 = 下月首个交易日，卖出价 = 当日开盘价
+    - 月度收益 = 持仓股票 (卖出价 / 买入价 - 1) 的等权平均
+
+    选股与风控：
     - 去掉 EMA50 硬性过滤
     - 动量从 6-1 改为 4-1
     - QQQ 50/200 MA 熊市保护：50MA < 200MA 时持现金，向上穿过时重启

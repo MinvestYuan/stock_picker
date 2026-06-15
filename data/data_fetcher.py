@@ -343,6 +343,32 @@ def _fetch_bars(ib: IB, ticker: str, end_date_str: str, duration_str: str) -> li
     return bars
 
 
+def _is_synthetic_ohlc(df: pd.DataFrame | pd.Series | None) -> bool:
+    """旧版缓存仅保存收盘价时，open/high/low 会被填成与 close 相同。"""
+    if df is None or (hasattr(df, "empty") and df.empty):
+        return False
+    if not isinstance(df, pd.DataFrame):
+        return True
+    if not {"open", "close"}.issubset(df.columns):
+        return True
+    o = pd.to_numeric(df["open"], errors="coerce")
+    c = pd.to_numeric(df["close"], errors="coerce")
+    valid = o.notna() & c.notna()
+    if not valid.any():
+        return True
+    return bool((o[valid] - c[valid]).abs().max() < 1e-9)
+
+
+def price_map_needs_ohlc_refresh(price_map: Dict[str, pd.DataFrame]) -> bool:
+    """判断价格缓存是否仍为“收盘价冒充 OHLC”的旧格式。"""
+    if not price_map:
+        return False
+    probe = price_map.get(DEFAULT_BENCHMARK)
+    if probe is None and price_map:
+        probe = next(iter(price_map.values()))
+    return _is_synthetic_ohlc(probe)
+
+
 def _bars_to_series(bars: list, ticker: str) -> pd.DataFrame | None:
     if not bars:
         return None
@@ -374,6 +400,10 @@ def _get_fetch_info(
     """
     last_date = None
     if existing is not None and not existing.empty:
+        if _is_synthetic_ohlc(existing):
+            # 旧缓存无真实开盘价，需全量重拉 OHLC 后替换
+            return default_duration, False, None
+
         last_date = existing.index.max()
         if hasattr(last_date, "tz") and last_date.tz is not None:
             last_date = last_date.tz_localize(None)
@@ -422,12 +452,10 @@ def _fetch_on_connection(
 
             if new_series is not None and not new_series.empty:
                 existing = existing_price_map.get(ticker)
-                if existing is None or existing.empty:
+                if existing is None or existing.empty or not is_incremental:
                     local_results[ticker] = new_series
                 else:
-                    new_series = (
-                        new_series[new_series.index > last_date] if last_date is not None else new_series
-                    )
+                    new_series = new_series[new_series.index > last_date]
                     if not new_series.empty:
                         combined = pd.concat([existing, new_series])
                         combined = combined[~combined.index.duplicated(keep="last")].sort_index()
@@ -512,10 +540,10 @@ def fetch_or_update_history(
 
                 if new_series is not None and not new_series.empty:
                     existing = results.get(ticker)
-                    if existing is None or existing.empty:
+                    if existing is None or existing.empty or not is_incremental:
                         results[ticker] = new_series
                     else:
-                        new_series = new_series[new_series.index > last_date] if last_date is not None else new_series
+                        new_series = new_series[new_series.index > last_date]
                         if not new_series.empty:
                             combined = pd.concat([existing, new_series])
                             combined = combined[~combined.index.duplicated(keep="last")].sort_index()

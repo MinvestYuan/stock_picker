@@ -16,6 +16,7 @@ from data.data_fetcher import (
     save_price_cache,
     fetch_or_update_history,
     get_cache_data_max_age_days,
+    price_map_needs_ohlc_refresh,
     DEFAULT_HISTORY_FILE,
     DEFAULT_BENCHMARK,
     DEFAULT_DURATION,
@@ -96,10 +97,15 @@ def _load_or_update_prices(tickers, args, cache_file, duration=None):
             if max_age is not None and max_age > 7:
                 print(f"[info] 缓存中最新的数据已 {max_age} 天未更新，将进行增量刷新", file=sys.stderr)
 
+    if price_map and price_map_needs_ohlc_refresh(price_map):
+        print(
+            "[warn] 检测到旧版收盘价缓存（open=close），将从 IB 全量刷新真实 OHLC 数据",
+            file=sys.stderr,
+        )
     # 同一天重复运行保护（以本地仓库 mtime 为准）：如果价格缓存文件今天已更新过，直接跳过 IB 增量部分
     # 避免用户多次运行 backtest 时反复看到“需要从 IB 获取/更新数据：N 只”
     # 第一次运行当天会正常做 trading-day 追平，之后同日运行使用缓存。
-    if price_map and cache_file.exists():
+    elif price_map and cache_file.exists():
         try:
             mtime = datetime.fromtimestamp(cache_file.stat().st_mtime)
             age_days = (datetime.now() - mtime).days
@@ -370,10 +376,10 @@ def generate_backtest_html(
 
     # === 图表准备 ===
     colors_map = {
-        "策略": "#047857",
-        benchmark: "#2563eb",
+        "策略": "#059669",
+        benchmark: "#3b82f6",
     }
-    extra_colors = ["#d97706", "#7c3aed", "#db2777", "#0d9488"]
+    extra_colors = ["#f59e0b", "#8b5cf6", "#ec4899", "#14b8a6"]
     for i, bm in enumerate(extra_benchmarks):
         colors_map[bm] = extra_colors[i % len(extra_colors)]
 
@@ -416,8 +422,11 @@ def generate_backtest_html(
 
     # Latest month top 5 stocks MTD yield trend data (for browser live update)
     latest_month = df_summary["month"].iloc[-1]
-    latest_details = df_detail[df_detail["month"] == latest_month]
-    top5_tickers = latest_details["ticker"].head(5).tolist()
+    if df_detail.empty or "month" not in df_detail.columns:
+        top5_tickers = []
+    else:
+        latest_details = df_detail[df_detail["month"] == latest_month]
+        top5_tickers = latest_details["ticker"].head(5).tolist()
     latest_row = df_summary[df_summary["month"] == latest_month].iloc[0]
     buy_date = pd.to_datetime(latest_row["buy_date"])
     sell_date = pd.to_datetime(latest_row["sell_date"])
@@ -458,15 +467,13 @@ def generate_backtest_html(
     date_range = f"{df_summary['month'].iloc[0]} 至 {df_summary['month'].iloc[-1]}"
     default_year = current_year if current_year in years else years[0]
 
-    primary_kpis = [
+    performance_kpis = [
         (f"{current_year} YTD", fmt_pct(ytd_return)),
         ("累计回报", fmt_pct(strategy_metrics.get("total_return", 0))),
         ("年化收益", fmt_pct(strategy_metrics.get("cagr", 0))),
         ("最大回撤", fmt_pct(strategy_metrics.get("max_drawdown", 0))),
         ("夏普比率", f"{strategy_metrics.get('sharpe', 0):.2f}"),
         ("胜率", f"{strategy_metrics.get('win_rate', 0) * 100:.0f}%"),
-    ]
-    secondary_kpis = [
         ("索提诺比率", f"{strategy_metrics.get('sortino', 0):.2f}"),
         ("Calmar 比率", f"{strategy_metrics.get('calmar', 0):.2f}"),
         ("年化波动率", fmt_pct(strategy_metrics.get("volatility", 0))),
@@ -491,25 +498,25 @@ def generate_backtest_html(
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap');
         :root {{
-            --bg: #f4f4f5;
+            --bg: #f8fafc;
             --surface: #ffffff;
-            --surface-muted: #fafafa;
-            --border: rgba(24, 24, 27, 0.08);
-            --border-strong: rgba(24, 24, 27, 0.12);
-            --text: #18181b;
-            --text-muted: #71717a;
-            --text-subtle: #a1a1aa;
-            --pos: #047857;
-            --neg: #be123c;
-            --accent: #18181b;
-            --shadow-sm: 0 1px 2px rgba(0,0,0,.04);
-            --shadow-md: 0 4px 24px rgba(0,0,0,.06);
-            --radius: 14px;
+            --surface-muted: #ffffff;
+            --border: rgba(148, 163, 184, 0.22);
+            --border-strong: rgba(148, 163, 184, 0.35);
+            --text: #334155;
+            --text-muted: #64748b;
+            --text-subtle: #94a3b8;
+            --pos: #059669;
+            --neg: #e11d48;
+            --accent: #3b82f6;
+            --shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.04);
+            --shadow-md: 0 8px 30px rgba(15, 23, 42, 0.05);
+            --radius: 16px;
         }}
         * {{ box-sizing: border-box; }}
         body {{
             font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
-            background: linear-gradient(180deg, #fafafa 0%, var(--bg) 100%);
+            background: var(--bg);
             color: var(--text);
             min-height: 100vh;
         }}
@@ -549,8 +556,9 @@ def generate_backtest_html(
             display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.75rem;
         }}
         @media (min-width: 768px) {{ .metric-grid {{ grid-template-columns: repeat(3, 1fr); }} }}
+        @media (min-width: 1024px) {{ .metric-grid.performance-grid {{ grid-template-columns: repeat(4, 1fr); }} }}
         .metric-card {{
-            background: var(--surface-muted);
+            background: var(--surface);
             border: 1px solid var(--border);
             border-radius: 12px;
             padding: 1rem 1.125rem;
@@ -569,10 +577,6 @@ def generate_backtest_html(
             font-size: 1.625rem; font-weight: 700;
             font-variant-numeric: tabular-nums;
             letter-spacing: -0.03em; line-height: 1;
-        }}
-        .metric-divider {{
-            height: 1px; background: var(--border);
-            margin: 1.25rem 0;
         }}
         .val-pos {{ color: var(--pos); }}
         .val-neg {{ color: var(--neg); }}
@@ -594,8 +598,8 @@ def generate_backtest_html(
         .data-table td:not(:first-child) {{ text-align: right; }}
         .data-table tr:last-child td {{ border-bottom: none; }}
         .data-table tbody tr:hover {{ background: #fafafa; }}
-        .data-table .row-highlight {{ background: rgba(4, 120, 87, 0.04); }}
-        .data-table .row-highlight:hover {{ background: rgba(4, 120, 87, 0.07); }}
+        .data-table .row-highlight {{ background: rgba(59, 130, 246, 0.05); }}
+        .data-table .row-highlight:hover {{ background: rgba(59, 130, 246, 0.08); }}
         .legend-dot {{
             display: inline-block; width: 8px; height: 8px;
             border-radius: 50%; margin-right: 0.5rem; vertical-align: middle;
@@ -649,36 +653,28 @@ def generate_backtest_html(
             font-size: 0.625rem; font-weight: 600;
             padding: 0.125rem 0.5rem; border-radius: 999px;
         }}
-        .ret-badge-pos {{ background: rgba(4, 120, 87, 0.1); color: var(--pos); }}
-        .ret-badge-neg {{ background: rgba(190, 18, 60, 0.08); color: var(--neg); }}
+        .ret-badge-pos {{ background: rgba(5, 150, 105, 0.1); color: var(--pos); }}
+        .ret-badge-neg {{ background: rgba(225, 29, 72, 0.08); color: var(--neg); }}
     </style>
 </head>
 <body class="antialiased">
     <div class="page">
         <header class="flex items-end justify-between gap-4 mb-8">
             <div>
-                <p class="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-400 mb-1.5">Portfolio Report</p>
-                <h1 class="font-display text-[2rem] text-zinc-900 leading-none">Minvest</h1>
+                <p class="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 mb-1.5">Portfolio Report</p>
+                <h1 class="font-display text-[2rem] text-slate-700 leading-none">Minvest</h1>
             </div>
             <span class="date-badge">{date_range}</span>
         </header>
 
         <section class="panel panel-padded section-block">
-            <div class="section-subtitle">核心指标</div>
-            <div class="metric-grid">
+            <div class="section-subtitle">Performance</div>
+            <div class="metric-grid performance-grid">
 """)
 
-        for label, value in primary_kpis:
+        for label, value in performance_kpis:
             _write_metric_card(f, label, value, _kpi_text_color(label, value))
 
-        f.write("""
-            </div>
-            <div class="metric-divider"></div>
-            <div class="section-subtitle">风险指标</div>
-            <div class="metric-grid">
-""")
-        for label, value in secondary_kpis:
-            _write_metric_card(f, label, value, _kpi_text_color(label, value))
         f.write("""
             </div>
         </section>
@@ -817,8 +813,8 @@ def generate_backtest_html(
                         <thead>
                             <tr>
                                 <th>标的</th>
-                                <th>买入开盘价</th>
-                                <th>卖出开盘价</th>
+                                <th>买入价格</th>
+                                <th>卖出价</th>
                                 <th>回报</th>
                             </tr>
                         </thead>
@@ -995,13 +991,13 @@ def generate_backtest_html(
             }
 
             function initTradingViewMonthly() {
-                const coloredData = tvMonthlyData.map(d => ({ time: d.time, value: d.value, color: d.value >= 0 ? '#047857' : '#be123c' }));
+                const coloredData = tvMonthlyData.map(d => ({ time: d.time, value: d.value, color: d.value >= 0 ? '#059669' : '#e11d48' }));
                 initHistogramChart('tv-monthly-chart', coloredData, { title: '策略月度回报', errorMsg: '月度回报图表创建出错，请刷新。' });
             }
 
             function initTradingViewDDDist() {
                 initHistogramChart('tv-dd-dist-chart', tvDDDistData, {
-                    title: '回撤分布', color: '#be123c',
+                    title: '回撤分布', color: '#e11d48',
                     chartOpts: { timeScale: { ...TV_BASE.timeScale, tickMarkFormatter: (time) => ((time - 100000) / 100).toFixed(1) + '%' } },
                     errorMsg: '回撤分布图表出错。',
                 });
@@ -1041,7 +1037,7 @@ def generate_backtest_html(
                         timeScale: { ...TV_BASE.timeScale, rightOffset: 3, barSpacing: 18, minBarWidth: 4 },
                     });
                     if (!chart) return;
-                    const colors = ['#047857', '#2563eb', '#d97706', '#7c3aed', '#db2777'];
+                    const colors = ['#059669', '#3b82f6', '#f59e0b', '#8b5cf6', '#ec4899'];
                     const seriesMap = {};
                     latestKMetadata.tickers.forEach((t, i) => {
                         const s = chart.addLineSeries({ color: colors[i % colors.length], lineWidth: 2, title: t });
