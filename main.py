@@ -208,7 +208,7 @@ def cmd_dashboard(args) -> int:
     # 7. 计算下个开盘日的前向信号
     print("[info] 正在计算下个开盘日的前向信号...", file=sys.stderr)
     latest_universe = get_latest_universe()
-    next_trade_date, next_picks = compute_next_signals(
+    asof_date, next_trade_date, next_picks = compute_next_signals(
         price_map=price_map,
         features=features,
         universe_tickers=latest_universe,
@@ -226,7 +226,7 @@ def cmd_dashboard(args) -> int:
     generate_backtest_html(
         df_summary, df_detail, output_path,
         benchmark=args.benchmark, extra_benchmarks=extra_benchmarks, price_map=price_map,
-        next_picks=next_picks, next_trade_date=next_trade_date,
+        next_picks=next_picks, next_trade_date=next_trade_date, asof_date=asof_date,
     )
     print(f"[info] HTML 已生成 → {output_path}", file=sys.stderr)
     return 0
@@ -270,13 +270,15 @@ def compute_next_signals(
     universe_tickers: list[str],
     top_n: int = 5,
     momentum_col: str = "momentum",
-) -> tuple[pd.Timestamp | None, list]:
-    """基于最新数据和 universe，计算下一个开盘日应该买入的前 N 只股票。"""
+) -> tuple[pd.Timestamp | None, pd.Timestamp | None, list]:
+    """基于最新数据和 universe，计算下一个开盘日应该买入的前 N 只股票。
+    返回: (asof_date, next_trade_date, top_picks)
+    """
     from data.data_fetcher import DEFAULT_BENCHMARK
 
     benchmark_ticker = DEFAULT_BENCHMARK
     if benchmark_ticker not in price_map:
-        return None, []
+        return None, None, []
 
     # 最近可用交易日
     benchmark_dates = price_map[benchmark_ticker].index
@@ -300,16 +302,16 @@ def compute_next_signals(
             qqq_bear = False
 
     if qqq_bear:
-        return next_trade_date, []
+        return asof_date, next_trade_date, []
 
     # 过滤出 universe 中可用的 features
     universe_features = {t: features[t] for t in universe_tickers if t in features}
     if not universe_features:
-        return next_trade_date, []
+        return asof_date, next_trade_date, []
 
     ranked = score_universe(universe_features, asof_date, momentum_col=momentum_col)
     top_picks = ranked[:top_n]
-    return next_trade_date, top_picks
+    return asof_date, next_trade_date, top_picks
 
 
 def _drawdown_from_cumulative(cum_returns: pd.Series) -> pd.Series:
@@ -349,6 +351,7 @@ def generate_backtest_html(
     mtd_snapshot: dict | None = None,
     next_picks: list | None = None,
     next_trade_date: pd.Timestamp | None = None,
+    asof_date: pd.Timestamp | None = None,
 ):
     """生成专业回测 HTML 仪表盘。
     包含：KPI卡片、权益曲线、回撤分布、月度回报、持仓表格、详细指标等。
@@ -538,6 +541,7 @@ def generate_backtest_html(
     # 准备前向信号展示数据
     has_signals = next_picks is not None and len(next_picks) > 0
     next_date_str = next_trade_date.strftime("%Y-%m-%d") if next_trade_date else "N/A"
+    asof_date_str = asof_date.strftime("%Y-%m-%d") if asof_date else "N/A"
     if has_signals:
         signal_cards = []
         for p in next_picks:
@@ -762,7 +766,10 @@ def generate_backtest_html(
 
         <section class="panel panel-padded section-block" style="border: 1px solid rgba(59,130,246,0.35); background: rgba(59,130,246,0.02);">
             <div class="section-head">
-                <div class="section-title" style="color: #2563eb;">下个开盘日信号</div>
+                <div>
+                    <div class="section-title" style="color: #2563eb;">下个开盘日信号</div>
+                    <div style="font-size:0.6875rem;color:var(--text-muted);margin-top:0.25rem;">基于 {asof_date_str} 收盘数据</div>
+                </div>
                 <span class="date-badge">{next_date_str}</span>
             </div>
             {signals_html}
@@ -1199,8 +1206,6 @@ def generate_backtest_html(
     </div>
 </body>
 </html>""")
-
-    print(f"[info] HTML 已生成 → index.html")
 
 def _calculate_metrics(returns: pd.Series) -> dict:
     """计算回测指标（原生实现，无需 QuantStats）"""
