@@ -40,17 +40,17 @@ RUSSELL_BACKTEST_HTML = Path("russell1000_backtest.html")
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="stock_picker",
-        description="Russell 1000 NPORT 月度回测工具\n\n"
+        description="Russell 1000 NPORT 月度回测与选股工具\n\n"
                     "常用命令:\n"
-                    "  backtest  基于历史 NPORT 持仓的月度回测 + 单一 HTML 报告（含表格、图表、多 benchmark 对比）\n"
-                    "  resolve   补全持仓 ticker（已移除 OpenFIGI，依赖 IB + 手动覆盖 + 失败缓存）"
+                    "  dashboard  基于历史 NPORT 持仓的月度回测 + 前向信号 + 单一 HTML 报告\n"
+                    "  resolve    补全持仓 ticker（已移除 OpenFIGI，依赖 IB + 手动覆盖 + 失败缓存）"
     )
     parser.add_argument(
         "command",
         nargs="?",
-        default="backtest",
-        choices=["backtest", "resolve", "russell-backtest", "resolve-tickers"],
-        help="主要命令（默认 backtest）：backtest=月度NPORT回测, resolve=ticker解析",
+        default="dashboard",
+        choices=["dashboard", "resolve", "resolve-tickers"],
+        help="主要命令（默认 dashboard）：dashboard=回测+前向信号, resolve=ticker解析",
     )
     parser.add_argument("--history-file", type=Path, default=DEFAULT_HISTORY_FILE)
     parser.add_argument("--universe-source", choices=["nport", "file", "history"], default="nport")
@@ -142,8 +142,8 @@ def _load_or_update_prices(tickers, args, cache_file, duration=None):
     return price_map
 
 
-def cmd_russell_backtest(args) -> int:
-    """Russell 1000 NPORT 持仓月度回测 + 单一 HTML 报告（含汇总表格、明细、图表、多 benchmark 对比）"""
+def cmd_dashboard(args) -> int:
+    """Russell 1000 NPORT 持仓月度回测 + 前向信号 + 单一 HTML 报告"""
     # 固定从 2020-01 开始回测（用户要求），--start-month 可用于覆盖
     start_month = args.start_month or "2020-01"
     print(f"[info] NPORT 持仓月度回测，起始月: {start_month}（固定从2020年开始）", file=sys.stderr)
@@ -205,10 +205,29 @@ def cmd_russell_backtest(args) -> int:
     for bm in extra_benchmarks:
         df_summary = _add_benchmark_returns(df_summary, price_map, bm, col_prefix=bm.lower())
 
-    # 7. 生成 HTML 报告（统一为单一 HTML 文件，不再生成 Excel）
+    # 7. 计算下个开盘日的前向信号
+    print("[info] 正在计算下个开盘日的前向信号...", file=sys.stderr)
+    latest_universe = get_latest_universe()
+    next_trade_date, next_picks = compute_next_signals(
+        price_map=price_map,
+        features=features,
+        universe_tickers=latest_universe,
+        top_n=args.top_n,
+    )
+    if next_picks:
+        tickers_str = ", ".join(p.ticker for p in next_picks)
+        print(f"[info] 下个开盘日 ({next_trade_date.date() if next_trade_date else 'N/A'}) 信号: {tickers_str}", file=sys.stderr)
+    else:
+        print(f"[info] 下个开盘日 ({next_trade_date.date() if next_trade_date else 'N/A'}) 信号: 持现金 (QQQ 50MA < 200MA) 或无可选股", file=sys.stderr)
+
+    # 8. 生成 HTML 报告（统一为单一 HTML 文件，不再生成 Excel）
     output_path = args.output or Path("index.html")
     output_path = output_path.with_suffix(".html") if output_path.suffix.lower() != ".html" else output_path
-    generate_backtest_html(df_summary, df_detail, output_path, benchmark=args.benchmark, extra_benchmarks=extra_benchmarks, price_map=price_map)
+    generate_backtest_html(
+        df_summary, df_detail, output_path,
+        benchmark=args.benchmark, extra_benchmarks=extra_benchmarks, price_map=price_map,
+        next_picks=next_picks, next_trade_date=next_trade_date,
+    )
     print(f"[info] HTML 已生成 → {output_path}", file=sys.stderr)
     return 0
 
@@ -243,6 +262,54 @@ def _add_benchmark_returns(df_summary: pd.DataFrame, price_map: dict, benchmark_
     df_summary[f"{prefix}_return"] = benchmark_rets
     df_summary[f"{prefix}_cumulative"] = (1 + df_summary[f"{prefix}_return"]).cumprod() - 1
     return df_summary
+
+
+def compute_next_signals(
+    price_map: dict,
+    features: dict,
+    universe_tickers: list[str],
+    top_n: int = 5,
+    momentum_col: str = "momentum",
+) -> tuple[pd.Timestamp | None, list]:
+    """基于最新数据和 universe，计算下一个开盘日应该买入的前 N 只股票。"""
+    from data.data_fetcher import DEFAULT_BENCHMARK
+
+    benchmark_ticker = DEFAULT_BENCHMARK
+    if benchmark_ticker not in price_map:
+        return None, []
+
+    # 最近可用交易日
+    benchmark_dates = price_map[benchmark_ticker].index
+    asof_date = pd.to_datetime(benchmark_dates.max())
+
+    # 下一个开盘日
+    next_trade_date = (asof_date + pd.offsets.BDay(1)).normalize()
+
+    # QQQ 熊市保护（与回测逻辑保持一致）
+    qqq_bear = False
+    if "QQQ" in price_map:
+        qqq_raw = price_map["QQQ"]
+        qqq_close = qqq_raw["close"] if isinstance(qqq_raw, pd.DataFrame) and "close" in qqq_raw.columns else qqq_raw
+        qqq_ema50 = qqq_close.ewm(span=50, adjust=False).mean()
+        qqq_ema200 = qqq_close.ewm(span=200, adjust=False).mean()
+        try:
+            q50 = float(qqq_ema50.loc[:asof_date].iloc[-1])
+            q200 = float(qqq_ema200.loc[:asof_date].iloc[-1])
+            qqq_bear = q50 < q200
+        except Exception:
+            qqq_bear = False
+
+    if qqq_bear:
+        return next_trade_date, []
+
+    # 过滤出 universe 中可用的 features
+    universe_features = {t: features[t] for t in universe_tickers if t in features}
+    if not universe_features:
+        return next_trade_date, []
+
+    ranked = score_universe(universe_features, asof_date, momentum_col=momentum_col)
+    top_picks = ranked[:top_n]
+    return next_trade_date, top_picks
 
 
 def _drawdown_from_cumulative(cum_returns: pd.Series) -> pd.Series:
@@ -280,6 +347,8 @@ def generate_backtest_html(
     extra_benchmarks: list[str] | None = None,
     price_map: dict[str, pd.DataFrame] | None = None,
     mtd_snapshot: dict | None = None,
+    next_picks: list | None = None,
+    next_trade_date: pd.Timestamp | None = None,
 ):
     """生成专业回测 HTML 仪表盘。
     包含：KPI卡片、权益曲线、回撤分布、月度回报、持仓表格、详细指标等。
@@ -465,6 +534,30 @@ def generate_backtest_html(
         portfolio_mtd = mtd_snapshot.get("portfolio_mtd", portfolio_mtd)
 
     date_range = f"{df_summary['month'].iloc[0]} 至 {df_summary['month'].iloc[-1]}"
+
+    # 准备前向信号展示数据
+    has_signals = next_picks is not None and len(next_picks) > 0
+    next_date_str = next_trade_date.strftime("%Y-%m-%d") if next_trade_date else "N/A"
+    if has_signals:
+        signal_cards = []
+        for p in next_picks:
+            signal_cards.append(
+                f'<div class="metric-card" style="text-align:center;">'
+                f'<div class="metric-value" style="font-size:1.25rem;">{p.ticker}</div>'
+                f'<div class="metric-label" style="margin-top:0.5rem;">总分 {p.total_score:.3f}</div>'
+                f'<div style="font-size:0.6875rem;color:var(--text-muted);margin-top:0.25rem;">'
+                f'动量 {p.momentum_score:.3f} · RRG {p.rrg_score:.3f}</div>'
+                f'<div style="font-size:0.6875rem;color:var(--text-subtle);margin-top:0.25rem;">'
+                f'Close/EMA50 {p.close_over_ema50:.3f}</div></div>'
+            )
+        signals_html = f'<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">{"".join(signal_cards)}</div>'
+    else:
+        signals_html = (
+            '<div style="text-align:center;padding:1.5rem;color:var(--text-muted);font-size:0.875rem;'
+            'background:var(--surface);border-radius:12px;border:1px dashed var(--border-strong);">'
+            '持现金（QQQ 50MA &lt; 200MA）或当前无可选股</div>'
+        )
+
     default_year = current_year if current_year in years else years[0]
 
     performance_kpis = [
@@ -666,6 +759,14 @@ def generate_backtest_html(
             </div>
             <span class="date-badge">{date_range}</span>
         </header>
+
+        <section class="panel panel-padded section-block" style="border: 1px solid rgba(59,130,246,0.35); background: rgba(59,130,246,0.02);">
+            <div class="section-head">
+                <div class="section-title" style="color: #2563eb;">下个开盘日信号</div>
+                <span class="date-badge">{next_date_str}</span>
+            </div>
+            {signals_html}
+        </section>
 
         <section class="panel panel-padded section-block">
             <div class="section-subtitle">Performance</div>
@@ -1154,14 +1255,13 @@ def _calculate_metrics(returns: pd.Series) -> dict:
 def main() -> int:
     args = parse_args()
 
-    if args.command in ("backtest", "russell-backtest"):
-        return cmd_russell_backtest(args)
+    if args.command == "dashboard":
+        return cmd_dashboard(args)
 
     if args.command in ("resolve", "resolve-tickers"):
         return cmd_resolve_tickers(args)
 
-    # 仅支持 backtest / resolve 命令（rank 已移除）
-    print(f"[error] 未知命令或不支持的命令: {args.command}。当前仅支持: backtest, resolve", file=sys.stderr)
+    print(f"[error] 未知命令: {args.command}。当前仅支持: dashboard, resolve", file=sys.stderr)
     return 1
 
 
