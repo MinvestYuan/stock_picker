@@ -179,23 +179,19 @@ def get_cache_data_max_age_days(price_map: Dict[str, pd.Series]) -> int | None:
     return int((now - max_date).days)
 
 
-# ==================== 失败 ticker 缓存（避免每次回测都重试无法获取价格的垃圾 ticker） ====================
+# ==================== 失败 ticker 缓存（已禁用）====================
+# 为避免幸存者偏差（Survivorship Bias），不再持久化记录获取失败的 ticker。
+# 每次运行都会重新尝试获取所有需要的价格数据，确保退市/临时失败的
+# 股票不会被永久排除在回测之外。
 FAILED_PRICE_FILE = ROOT_DIR / "cache" / "failed_price_tickers.json"
 
 def load_failed_price_tickers() -> set[str]:
-    if FAILED_PRICE_FILE.exists():
-        try:
-            with open(FAILED_PRICE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return set(data.get("tickers", []))
-        except Exception:
-            return set()
+    """（已禁用）始终返回空集合，不再读取持久化失败缓存。"""
     return set()
 
 def save_failed_price_tickers(tickers: set[str]):
-    FAILED_PRICE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(FAILED_PRICE_FILE, "w", encoding="utf-8") as f:
-        json.dump({"tickers": sorted(tickers)}, f, indent=2)
+    """（已禁用）不再写入失败缓存文件。"""
+    pass
 
 
 def save_price_cache(price_map: Dict[str, pd.Series], cache_file: Path):
@@ -479,13 +475,10 @@ def fetch_or_update_history(
     if hasattr(target_end, "tz") and target_end.tz is not None:
         target_end = target_end.tz_localize(None)
 
-    # 预先筛选需要从 IB 请求的 ticker（跳过已新鲜的 + 已知失败的垃圾 ticker）
-    failed = load_failed_price_tickers()
+    # 预先筛选需要从 IB 请求的 ticker（跳过已新鲜的）
     to_process: list = []
     for ticker in tickers:
         existing = results.get(ticker)
-        if ticker in failed and (existing is None or existing.empty):
-            continue  # 持久跳过之前无法获取价格的 ticker，避免每次回测都“新”下载尝试
         info = _get_fetch_info(ticker, existing, target_end, duration)
         if info is None:
             continue
@@ -568,15 +561,6 @@ def fetch_or_update_history(
 
     print(f"[info] 价格数据更新完成，共 {len(results)} 只股票", file=sys.stderr)
 
-    # 持久化标记本次结束后仍然没有任何价格数据的 ticker（主要是 NPORT 里无法在 IB 找到的垃圾符号）
-    # 下次回测时会直接跳过它们的完整下载尝试，不会再显示“完整下载 XXX → 11 Y”
-    current_failed = load_failed_price_tickers()
-    for ticker in tickers:
-        ser = results.get(ticker)
-        if ser is None or (hasattr(ser, "empty") and ser.empty):
-            current_failed.add(ticker)
-    if current_failed:
-        save_failed_price_tickers(current_failed)
 
     return results
 
