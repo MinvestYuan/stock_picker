@@ -199,10 +199,43 @@ def cmd_russell_backtest(args) -> int:
     for bm in extra_benchmarks:
         df_summary = _add_benchmark_returns(df_summary, price_map, bm, col_prefix=bm.lower())
 
-    # 7. 生成 HTML 报告（统一为单一 HTML 文件，不再生成 Excel）
+    # 7. QuantStats 深度指标
+    print("[info] 正在计算 QuantStats 风险指标...", file=sys.stderr)
+    qs_metrics = None
+    try:
+        import quantstats as qs
+        qs_returns = df_summary.set_index("month")["monthly_return"].copy()
+        qs_returns.index = pd.to_datetime(qs_returns.index + "-01")
+        qs_metrics_df = qs.reports.metrics(qs_returns, mode="full", display=False, periods=12)
+        def _qs_float(idx):
+            if idx not in qs_metrics_df.index:
+                return 0.0
+            v = qs_metrics_df.loc[idx, "Strategy"]
+            try:
+                return float(v)
+            except Exception:
+                return 0.0
+        qs_metrics = {
+            "sortino": _qs_float("Sortino"),
+            "omega": _qs_float("Omega"),
+            "calmar": _qs_float("Calmar"),
+            "profit_factor": _qs_float("Profit Factor"),
+            "gain_pain": _qs_float("Gain/Pain Ratio"),
+            "skewness": _qs_float("Skew"),
+            "kurtosis": _qs_float("Kurtosis"),
+            "recovery_factor": _qs_float("Recovery Factor"),
+            "ulcer_index": _qs_float("Ulcer Index"),
+            "tail_ratio": _qs_float("Tail Ratio"),
+            "common_sense_ratio": _qs_float("Common Sense Ratio"),
+            "cpc_index": _qs_float("CPC Index"),
+        }
+    except Exception as e:
+        print(f"[warn] QuantStats 分析失败: {e}", file=sys.stderr)
+
+    # 8. 生成 HTML 报告（统一为单一 HTML 文件，不再生成 Excel）
     output_path = args.output or Path("index.html")
     output_path = output_path.with_suffix(".html") if output_path.suffix.lower() != ".html" else output_path
-    generate_backtest_html(df_summary, df_detail, output_path, benchmark=args.benchmark, extra_benchmarks=extra_benchmarks, price_map=price_map)
+    generate_backtest_html(df_summary, df_detail, output_path, benchmark=args.benchmark, extra_benchmarks=extra_benchmarks, price_map=price_map, qs_metrics=qs_metrics)
     print(f"[info] HTML 已生成 → {output_path}", file=sys.stderr)
     return 0
 
@@ -239,7 +272,7 @@ def _add_benchmark_returns(df_summary: pd.DataFrame, price_map: dict, benchmark_
     return df_summary
 
 
-def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, output_path: Path, benchmark: str = "SPY", extra_benchmarks: list[str] | None = None, price_map: Dict[str, pd.DataFrame] | None = None):
+def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, output_path: Path, benchmark: str = "SPY", extra_benchmarks: list[str] | None = None, price_map: Dict[str, pd.DataFrame] | None = None, qs_metrics: dict | None = None):
     """生成专业回测 HTML 仪表盘。
     包含：KPI卡片、权益曲线、回撤分布、月度回报、持仓表格、详细指标等。
     """
@@ -496,6 +529,46 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
 
 """)
 
+        # QuantStats 深度指标卡片
+        if qs_metrics:
+            def _fmt_qs(v):
+                if v is None:
+                    return "—"
+                if abs(v) >= 100:
+                    return f"{v:.1f}"
+                if abs(v) >= 10:
+                    return f"{v:.2f}"
+                if abs(v) >= 1:
+                    return f"{v:.3f}"
+                return f"{v:.4f}"
+            qs_cards = [
+                ("Sortino", _fmt_qs(qs_metrics.get("sortino")), "text-emerald-600" if (qs_metrics.get("sortino") or 0) >= 0 else "text-rose-600"),
+                ("Omega Ratio", _fmt_qs(qs_metrics.get("omega")), "text-emerald-600" if (qs_metrics.get("omega") or 0) >= 1 else "text-rose-600"),
+                ("Profit Factor", _fmt_qs(qs_metrics.get("profit_factor")), "text-emerald-600" if (qs_metrics.get("profit_factor") or 0) >= 1 else "text-rose-600"),
+                ("Gain/Pain", _fmt_qs(qs_metrics.get("gain_pain")), "text-emerald-600" if (qs_metrics.get("gain_pain") or 0) >= 0 else "text-rose-600"),
+                ("Skewness", _fmt_qs(qs_metrics.get("skewness")), "text-emerald-600" if (qs_metrics.get("skewness") or 0) >= 0 else "text-rose-600"),
+                ("Recovery Factor", _fmt_qs(qs_metrics.get("recovery_factor")), "text-emerald-600" if (qs_metrics.get("recovery_factor") or 0) >= 0 else "text-rose-600"),
+            ]
+            f.write("""
+        <!-- QuantStats Depth Metrics -->
+        <div class="mb-6">
+            <div class="flex items-center justify-between mb-3">
+                <div class="section-title">QuantStats 深度风险指标</div>
+            </div>
+            <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-3 gap-4">
+""")
+            for label, value, text_color in qs_cards:
+                f.write(f"""
+                <div class="kpi-card bg-white border border-[#e5e7eb] rounded-xl p-4">
+                    <div class="text-[10px] font-medium text-[#666] tracking-[0.5px]">{label}</div>
+                    <div class="mt-1.5 text-[28px] font-semibold tabular-nums tracking-tighter {text_color} leading-none">{value}</div>
+                </div>
+""")
+            f.write("""
+            </div>
+        </div>
+""")
+
         # MTD section with proper python f-interp for the initial portfolio_mtd value (overridden by live JS)
         mtd_val = portfolio_mtd * 100
         mtd_color = "text-emerald-600" if mtd_val >= 0 else "text-rose-600"
@@ -620,7 +693,11 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
         f.write("""
             </div>
         </div>
+""")
 
+        # QuantStats 报告链接已移除
+
+        f.write("""
         <script>
             const annualReturns = """ + json.dumps(annual_returns) + """;
             const tvEquityData = """ + json.dumps(tv_equity_series) + """;

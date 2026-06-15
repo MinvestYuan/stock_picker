@@ -14,3 +14,6 @@ xlsxwriter>=3.1.0
 # 价格缓存已升级为 Parquet 格式（强烈推荐安装 pyarrow 获得最佳体验）
 # pip install pyarrow
 # （pandas 会自动使用 pyarrow 或 fastparquet 任一可用的引擎）
+
+# QuantStats 用于生成专业的投资组合分析报告
+quantstats>=0.0.62
