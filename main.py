@@ -199,43 +199,10 @@ def cmd_russell_backtest(args) -> int:
     for bm in extra_benchmarks:
         df_summary = _add_benchmark_returns(df_summary, price_map, bm, col_prefix=bm.lower())
 
-    # 7. QuantStats 深度指标
-    print("[info] 正在计算 QuantStats 风险指标...", file=sys.stderr)
-    qs_metrics = None
-    try:
-        import quantstats as qs
-        qs_returns = df_summary.set_index("month")["monthly_return"].copy()
-        qs_returns.index = pd.to_datetime(qs_returns.index + "-01")
-        qs_metrics_df = qs.reports.metrics(qs_returns, mode="full", display=False, periods=12)
-        def _qs_float(idx):
-            if idx not in qs_metrics_df.index:
-                return 0.0
-            v = qs_metrics_df.loc[idx, "Strategy"]
-            try:
-                return float(v)
-            except Exception:
-                return 0.0
-        qs_metrics = {
-            "sortino": _qs_float("Sortino"),
-            "omega": _qs_float("Omega"),
-            "calmar": _qs_float("Calmar"),
-            "profit_factor": _qs_float("Profit Factor"),
-            "gain_pain": _qs_float("Gain/Pain Ratio"),
-            "skewness": _qs_float("Skew"),
-            "kurtosis": _qs_float("Kurtosis"),
-            "recovery_factor": _qs_float("Recovery Factor"),
-            "ulcer_index": _qs_float("Ulcer Index"),
-            "tail_ratio": _qs_float("Tail Ratio"),
-            "common_sense_ratio": _qs_float("Common Sense Ratio"),
-            "cpc_index": _qs_float("CPC Index"),
-        }
-    except Exception as e:
-        print(f"[warn] QuantStats 分析失败: {e}", file=sys.stderr)
-
-    # 8. 生成 HTML 报告（统一为单一 HTML 文件，不再生成 Excel）
+    # 7. 生成 HTML 报告（统一为单一 HTML 文件，不再生成 Excel）
     output_path = args.output or Path("index.html")
     output_path = output_path.with_suffix(".html") if output_path.suffix.lower() != ".html" else output_path
-    generate_backtest_html(df_summary, df_detail, output_path, benchmark=args.benchmark, extra_benchmarks=extra_benchmarks, price_map=price_map, qs_metrics=qs_metrics)
+    generate_backtest_html(df_summary, df_detail, output_path, benchmark=args.benchmark, extra_benchmarks=extra_benchmarks, price_map=price_map)
     print(f"[info] HTML 已生成 → {output_path}", file=sys.stderr)
     return 0
 
@@ -272,7 +239,33 @@ def _add_benchmark_returns(df_summary: pd.DataFrame, price_map: dict, benchmark_
     return df_summary
 
 
-def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, output_path: Path, benchmark: str = "SPY", extra_benchmarks: list[str] | None = None, price_map: Dict[str, pd.DataFrame] | None = None, qs_metrics: dict | None = None):
+def _drawdown_from_cumulative(cum_returns: pd.Series) -> pd.Series:
+    """基于累计回报序列计算回撤（-100% ~ 0%）。"""
+    equity = 1 + cum_returns
+    peak = equity.cummax()
+    return (equity - peak) / peak
+
+
+def _kpi_text_color(label: str, value: str) -> str:
+    if label in ("最大回撤", "最差月份") or value.startswith("-"):
+        return "text-rose-600"
+    if label in ("夏普比率", "索提诺比率", "Calmar 比率", "盈亏比"):
+        try:
+            return "text-emerald-600" if float(value.replace("%", "")) >= 1 else "text-rose-600"
+        except ValueError:
+            pass
+    return "text-emerald-600"
+
+
+def generate_backtest_html(
+    df_summary: pd.DataFrame,
+    df_detail: pd.DataFrame,
+    output_path: Path,
+    benchmark: str = "SPY",
+    extra_benchmarks: list[str] | None = None,
+    price_map: dict[str, pd.DataFrame] | None = None,
+    mtd_snapshot: dict | None = None,
+):
     """生成专业回测 HTML 仪表盘。
     包含：KPI卡片、权益曲线、回撤分布、月度回报、持仓表格、详细指标等。
     """
@@ -338,15 +331,16 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
             'close_over_ema50': row.get('close_over_ema50', 0),
         })
 
-    # === 计算 2026 YTD (今年收益) ===
-    y2026_months = [m for m in monthly_data if m['year'] == '2026']
-    ytd_2026 = 0.0
-    if y2026_months:
+    # === 计算当年 YTD ===
+    current_year = str(datetime.now().year)
+    ytd_months = [m for m in monthly_data if m["year"] == current_year]
+    ytd_return = 0.0
+    if ytd_months:
         ytd = 1.0
-        for m in y2026_months:
-            ytd *= (1 + m['monthly_return'])
-        ytd_2026 = ytd - 1
-    print(f"[info] 2026 YTD 收益: {ytd_2026:.4%} (基于 {len(y2026_months)} 个月数据)")
+        for m in ytd_months:
+            ytd *= (1 + m["monthly_return"])
+        ytd_return = ytd - 1
+    print(f"[info] {current_year} YTD 收益: {ytd_return:.4%} (基于 {len(ytd_months)} 个月数据)")
 
     def fmt_pct(v): return f"{v:.1%}" if abs(v) < 10 else f"{v:.0%}"
     def fmt_num(v, dec=2): return f"{v:.{dec}f}"
@@ -362,15 +356,8 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
         else:
             print(f"[warn] {bm} 的收益数据在 df_summary 中缺失（列 {col} 不存在），HTML 中将不显示该 benchmark", file=sys.stderr)
 
-    # 额外计算 Max DD 等用于卡片
-    # 正确计算：基于权益曲线 (equity = 1 + cum_return)，DD = (equity - peak_equity) / peak_equity
-    # 这样最大回撤始终在 -100% ~ 0% 之间（对于无杠杆多头）
-    equity = 1 + df_summary["cumulative_return"]
-    peak_equity = equity.cummax()
-    proper_dd = (equity - peak_equity) / peak_equity
-    max_dd = proper_dd.min()
     strategy_metrics = all_metrics["策略"]
-    strategy_metrics["max_drawdown"] = max_dd
+    drawdown = _drawdown_from_cumulative(df_summary["cumulative_return"])
 
     # === 图表准备 ===
     colors_map = {
@@ -381,12 +368,6 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
     for i, bm in enumerate(extra_benchmarks):
         colors_map[bm] = extra_colors[i % len(extra_colors)]
 
-    # (Equity curve now rendered via TradingView lightweight-charts below; no plotly fig for it)
-
-    # Prepare TV data for drawdown (reuse equity calc)
-    equity = 1 + df_summary["cumulative_return"]
-    peak_equity = equity.cummax()
-    drawdown = (equity - peak_equity) / peak_equity
     tv_drawdown_series = {}
     tv_drawdown_series["策略"] = [
         {"time": f"{row['month']}-01", "value": round(float(d), 6)}
@@ -395,9 +376,7 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
     for bm in [benchmark] + extra_benchmarks:
         col = f"{bm.lower()}_cumulative"
         if col in df_summary.columns:
-            bm_equity = 1 + df_summary[col]
-            bm_peak = bm_equity.cummax()
-            bm_dd = (bm_equity - bm_peak) / bm_peak
+            bm_dd = _drawdown_from_cumulative(df_summary[col])
             tv_drawdown_series[bm] = [
                 {"time": f"{row['month']}-01", "value": round(float(d), 6)}
                 for (_, row), d in zip(df_summary.iterrows(), bm_dd)
@@ -460,17 +439,32 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
 
     portfolio_mtd = sum(mtd_returns.values()) / len(mtd_returns) if mtd_returns else 0
 
-    # === KPI 卡片数据 ===
-    kpis = [
-        ("2026 YTD", fmt_pct(ytd_2026), ""),
-        ("累计回报", fmt_pct(strategy_metrics.get('total_return', 0)), ""),
-        ("年化收益", fmt_pct(strategy_metrics.get('cagr', 0)), ""),
-        ("最大回撤", fmt_pct(strategy_metrics.get('max_drawdown', 0)), ""),
-        ("夏普比率", f"{strategy_metrics.get('sharpe', 0):.2f}", ""),
-        ("胜率", f"{strategy_metrics.get('win_rate', 0)*100:.0f}%", ""),
-    ]
+    if mtd_snapshot:
+        latest_k_metadata = mtd_snapshot.get("metadata", latest_k_metadata)
+        latest_k_fallback = mtd_snapshot.get("fallback", latest_k_fallback)
+        mtd_returns = mtd_snapshot.get("returns", mtd_returns)
+        portfolio_mtd = mtd_snapshot.get("portfolio_mtd", portfolio_mtd)
 
-    # Use monthly_data prepared above for cards and filtering
+    date_range = f"{df_summary['month'].iloc[0]} 至 {df_summary['month'].iloc[-1]}"
+    default_year = current_year if current_year in years else years[0]
+
+    primary_kpis = [
+        (f"{current_year} YTD", fmt_pct(ytd_return)),
+        ("累计回报", fmt_pct(strategy_metrics.get("total_return", 0))),
+        ("年化收益", fmt_pct(strategy_metrics.get("cagr", 0))),
+        ("最大回撤", fmt_pct(strategy_metrics.get("max_drawdown", 0))),
+        ("夏普比率", f"{strategy_metrics.get('sharpe', 0):.2f}"),
+        ("胜率", f"{strategy_metrics.get('win_rate', 0) * 100:.0f}%"),
+    ]
+    secondary_kpis = [
+        ("索提诺比率", f"{strategy_metrics.get('sortino', 0):.2f}"),
+        ("Calmar 比率", f"{strategy_metrics.get('calmar', 0):.2f}"),
+        ("年化波动率", fmt_pct(strategy_metrics.get("volatility", 0))),
+        ("盈亏比", f"{strategy_metrics.get('profit_factor', 0):.2f}"),
+        ("最差月份", fmt_pct(strategy_metrics.get("worst_monthly_return", 0))),
+        ("中位月回报", fmt_pct(strategy_metrics.get("median_return", 0))),
+    ]
+    benchmark_names = ["策略"] + [benchmark] + extra_benchmarks
 
     # 合并写入专业 HTML (Tailwind + lightweight-charts 现代仪表盘)
     tailwind = "https://cdn.tailwindcss.com"
@@ -506,17 +500,15 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
         <!-- Claude-inspired clean header -->
         <div class="mb-6">
             <h1 class="font-display text-[28px] font-semibold tracking-[-0.03em]">Minvest</h1>
-            <p class="text-[#666] mt-1 text-[13px]">2020-01 至 2026-06</p>
+            <p class="text-[#666] mt-1 text-[13px]">{date_range}</p>
         </div>
 
         <!-- KPI Cards -->
-        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-3 gap-4 mb-6">
+        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-3 gap-4 mb-4">
 """)
 
-        # KPI cards
-        for label, value, desc in kpis:
-            # Positive numbers (returns, sharpe, win rate) → emerald green; negative (e.g. drawdown, losses) → rose red
-            text_color = "text-rose-600" if value.startswith("-") else "text-emerald-600"
+        for label, value in primary_kpis:
+            text_color = _kpi_text_color(label, value)
             f.write(f"""
             <div class="kpi-card bg-white border border-[#e5e7eb] rounded-xl p-4">
                 <div class="text-[10px] font-medium text-[#666] tracking-[0.5px]">{label}</div>
@@ -527,44 +519,60 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
         f.write("""
         </div>
 
+        <!-- Secondary Risk Metrics -->
+        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-3 gap-4 mb-6">
 """)
-
-        # QuantStats 深度指标卡片
-        if qs_metrics:
-            def _fmt_qs(v):
-                if v is None:
-                    return "—"
-                if abs(v) >= 100:
-                    return f"{v:.1f}"
-                if abs(v) >= 10:
-                    return f"{v:.2f}"
-                if abs(v) >= 1:
-                    return f"{v:.3f}"
-                return f"{v:.4f}"
-            qs_cards = [
-                ("Sortino", _fmt_qs(qs_metrics.get("sortino")), "text-emerald-600" if (qs_metrics.get("sortino") or 0) >= 0 else "text-rose-600"),
-                ("Omega Ratio", _fmt_qs(qs_metrics.get("omega")), "text-emerald-600" if (qs_metrics.get("omega") or 0) >= 1 else "text-rose-600"),
-                ("Profit Factor", _fmt_qs(qs_metrics.get("profit_factor")), "text-emerald-600" if (qs_metrics.get("profit_factor") or 0) >= 1 else "text-rose-600"),
-                ("Gain/Pain", _fmt_qs(qs_metrics.get("gain_pain")), "text-emerald-600" if (qs_metrics.get("gain_pain") or 0) >= 0 else "text-rose-600"),
-                ("Skewness", _fmt_qs(qs_metrics.get("skewness")), "text-emerald-600" if (qs_metrics.get("skewness") or 0) >= 0 else "text-rose-600"),
-                ("Recovery Factor", _fmt_qs(qs_metrics.get("recovery_factor")), "text-emerald-600" if (qs_metrics.get("recovery_factor") or 0) >= 0 else "text-rose-600"),
-            ]
-            f.write("""
-        <!-- QuantStats Depth Metrics -->
-        <div class="mb-6">
-            <div class="flex items-center justify-between mb-3">
-                <div class="section-title">QuantStats 深度风险指标</div>
+        for label, value in secondary_kpis:
+            text_color = _kpi_text_color(label, value)
+            f.write(f"""
+            <div class="kpi-card bg-white border border-[#e5e7eb] rounded-xl p-3">
+                <div class="text-[10px] font-medium text-[#666] tracking-[0.5px]">{label}</div>
+                <div class="mt-1 text-xl font-semibold tabular-nums tracking-tighter {text_color} leading-none">{value}</div>
             </div>
-            <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-3 gap-4">
 """)
-            for label, value, text_color in qs_cards:
-                f.write(f"""
-                <div class="kpi-card bg-white border border-[#e5e7eb] rounded-xl p-4">
-                    <div class="text-[10px] font-medium text-[#666] tracking-[0.5px]">{label}</div>
-                    <div class="mt-1.5 text-[28px] font-semibold tabular-nums tracking-tighter {text_color} leading-none">{value}</div>
-                </div>
+        f.write("""
+        </div>
+
+        <!-- Benchmark Comparison -->
+        <div class="mb-6">
+            <div class="section-title mb-3">策略 vs 基准对比</div>
+            <div class="card overflow-hidden">
+                <table class="w-full">
+                    <thead>
+                        <tr class="bg-[#f9fafb]">
+                            <th class="text-left px-4 py-2">名称</th>
+                            <th class="text-right px-4 py-2 tabular-nums">累计回报</th>
+                            <th class="text-right px-4 py-2 tabular-nums">年化收益</th>
+                            <th class="text-right px-4 py-2 tabular-nums">最大回撤</th>
+                            <th class="text-right px-4 py-2 tabular-nums">夏普</th>
+                            <th class="text-right px-4 py-2 tabular-nums">胜率</th>
+                        </tr>
+                    </thead>
+                    <tbody>
 """)
-            f.write("""
+        for name in benchmark_names:
+            if name not in all_metrics:
+                continue
+            m = all_metrics[name]
+            row_bg = "bg-emerald-50/50" if name == "策略" else ""
+            dot_color = colors_map.get(name, "#6b7280")
+            ret_cls = "text-emerald-600" if m["total_return"] >= 0 else "text-rose-600"
+            cagr_cls = "text-emerald-600" if m["cagr"] >= 0 else "text-rose-600"
+            f.write(f"""
+                        <tr class="hover:bg-zinc-50 {row_bg}">
+                            <td class="px-4 py-2 font-medium">
+                                <span class="inline-block w-2 h-2 rounded-full mr-2 align-middle" style="background:{dot_color}"></span>{name}
+                            </td>
+                            <td class="px-4 py-2 text-right tabular-nums {ret_cls}">{fmt_pct(m["total_return"])}</td>
+                            <td class="px-4 py-2 text-right tabular-nums {cagr_cls}">{fmt_pct(m["cagr"])}</td>
+                            <td class="px-4 py-2 text-right tabular-nums text-rose-600">{fmt_pct(m["max_drawdown"])}</td>
+                            <td class="px-4 py-2 text-right tabular-nums">{m["sharpe"]:.2f}</td>
+                            <td class="px-4 py-2 text-right tabular-nums">{m["win_rate"] * 100:.0f}%</td>
+                        </tr>
+""")
+        f.write("""
+                    </tbody>
+                </table>
             </div>
         </div>
 """)
@@ -632,7 +640,7 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
                 <select id="year-select" class="border border-[#e5e7eb] rounded-md px-3 py-1 text-sm bg-white focus:outline-none focus:border-[#d4d4d8]" onchange="filterByYear()">
 """)
         for y in years:
-            sel = ' selected' if y == '2026' else ''
+            sel = ' selected' if y == default_year else ''
             f.write(f'                        <option value="{y}"{sel}>{y}</option>\n')
         f.write("""
                     </select>
@@ -695,8 +703,6 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
         </div>
 """)
 
-        # QuantStats 报告链接已移除
-
         f.write("""
         <script>
             const annualReturns = """ + json.dumps(annual_returns) + """;
@@ -708,6 +714,91 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
             const latestKMetadata = """ + json.dumps(latest_k_metadata) + """;
             const latestKFallback = """ + json.dumps(latest_k_fallback) + """;
             const mtdReturnsReport = """ + json.dumps(mtd_returns) + """;
+            const defaultYear = """ + json.dumps(default_year) + """;
+
+            const TV_BASE = {
+                layout: { background: { color: '#ffffff' }, textColor: '#374151' },
+                grid: { vertLines: { color: '#f3f4f6' }, horzLines: { color: '#f3f4f6' } },
+                timeScale: { borderColor: '#e5e7eb', timeVisible: false, secondsVisible: false },
+                crosshair: { mode: 0, vertLine: { color: '#d1d5db', width: 1, style: 3 }, horzLine: { color: '#d1d5db', width: 1, style: 3 } },
+            };
+
+            function createTVChart(container, height, extra = {}) {
+                if (!container || typeof LightweightCharts === 'undefined') return null;
+                return LightweightCharts.createChart(container, {
+                    width: container.clientWidth || 800,
+                    height: container.clientHeight || height,
+                    ...TV_BASE,
+                    rightPriceScale: { borderColor: '#e5e7eb', ...(extra.rightPriceScale || {}) },
+                    ...extra,
+                });
+            }
+
+            function bindChartResize(chart, container, height) {
+                const resize = () => chart.resize(container.clientWidth || 800, container.clientHeight || height);
+                window.addEventListener('resize', resize);
+                setTimeout(() => { resize(); try { chart.timeScale().fitContent(); } catch(e) {} }, 80);
+            }
+
+            function showChartError(container, msg) {
+                container.innerHTML = `<div style="padding:12px;color:#b91c1c;font-size:12px;background:#fef2f2;border-radius:6px;">${msg}</div>`;
+            }
+
+            function initMultiLineChart(containerId, seriesMap, options = {}) {
+                const container = document.getElementById(containerId);
+                if (!container || !seriesMap || Object.keys(seriesMap).length === 0) return;
+                const height = options.height || 240;
+                try {
+                    const chart = createTVChart(container, height, options.chartOpts || {});
+                    if (!chart || typeof chart.addLineSeries !== 'function') {
+                        showChartError(container, options.errorMsg || '图表初始化失败');
+                        return;
+                    }
+                    Object.keys(seriesMap).forEach(name => {
+                        const data = seriesMap[name];
+                        if (!data || data.length === 0) return;
+                        const lw = options.lineWidth ? options.lineWidth(name) : (name === '策略' ? 2 : 1.5);
+                        chart.addLineSeries({ color: chartColors[name] || '#6b7280', lineWidth: lw, title: name }).setData(data);
+                    });
+                    bindChartResize(chart, container, height);
+                } catch (err) {
+                    console.error(containerId, err);
+                    showChartError(container, options.errorMsg || '图表创建出错');
+                }
+            }
+
+            function initHistogramChart(containerId, data, options = {}) {
+                const container = document.getElementById(containerId);
+                if (!container || !data || data.length === 0) return;
+                const height = options.height || 240;
+                try {
+                    const chart = createTVChart(container, height, options.chartOpts || {});
+                    const series = chart.addHistogramSeries({ title: options.title || '', color: options.color });
+                    series.setData(data);
+                    bindChartResize(chart, container, height);
+                } catch (err) {
+                    console.error(containerId, err);
+                    showChartError(container, options.errorMsg || '图表创建出错');
+                }
+            }
+
+            function waitForCharts(callback, container, failMsg) {
+                if (typeof LightweightCharts !== 'undefined' && typeof LightweightCharts.createChart === 'function') {
+                    callback();
+                    return;
+                }
+                let attempts = 0;
+                const iv = setInterval(() => {
+                    attempts++;
+                    if (typeof LightweightCharts !== 'undefined' && typeof LightweightCharts.createChart === 'function') {
+                        clearInterval(iv);
+                        callback();
+                    } else if (attempts > 12) {
+                        clearInterval(iv);
+                        if (container) container.innerHTML = `<div style="padding:12px;color:#666;font-size:12px;">${failMsg}</div>`;
+                    }
+                }, 100);
+            }
 
             function filterByYear() {
                 const select = document.getElementById('year-select');
@@ -750,260 +841,29 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
 
             function initTradingViewEquity() {
                 const container = document.getElementById('tv-equity-chart');
-                if (!container || !tvEquityData || Object.keys(tvEquityData).length === 0) {
-                    console.warn('TV chart data missing');
-                    return;
-                }
-                function doCreate() {
-                    try {
-                        // use client width for responsive
-                        const chart = LightweightCharts.createChart(container, {
-                            width: container.clientWidth || 800,
-                            height: container.clientHeight || 380,
-                            layout: {
-                                background: { color: '#ffffff' },
-                                textColor: '#374151',
-                            },
-                            grid: {
-                                vertLines: { color: '#f3f4f6' },
-                                horzLines: { color: '#f3f4f6' },
-                            },
-                            timeScale: {
-                                borderColor: '#e5e7eb',
-                                timeVisible: false,
-                                secondsVisible: false,
-                            },
-                            rightPriceScale: {
-                                borderColor: '#e5e7eb',
-                                scaleMargins: { top: 0.1, bottom: 0.1 },
-                            },
-                            crosshair: {
-                                mode: 0,
-                                vertLine: { color: '#d1d5db', width: 1, style: 3 },
-                                horzLine: { color: '#d1d5db', width: 1, style: 3 },
-                            },
-                            legend: {
-                                visible: true,
-                                position: 'top',
-                            },
-                        });
-
-                        if (!chart || typeof chart.addLineSeries !== 'function') {
-                            console.error('createChart did not return a valid chart with addLineSeries.');
-                            container.innerHTML = '<div style="padding:12px;color:#b91c1c;font-size:12px;background:#fef2f2;border-radius:6px;">累计权益曲线初始化失败（图表库加载异常）。请尝试刷新页面或使用其他浏览器。</div>';
-                            return;
-                        }
-
-                        Object.keys(tvEquityData).forEach(name => {
-                            const data = tvEquityData[name];
-                            if (!data || data.length === 0) return;
-                            const color = chartColors[name] || '#6b7280';
-                            const lineWidth = (name === '策略') ? 3 : 2;
-                            const series = chart.addLineSeries({
-                                color: color,
-                                lineWidth: lineWidth,
-                                title: name,
-                            });
-                            series.setData(data);
-                        });
-
-                        // handle resize
-                        function handleResize() {
-                            chart.resize(container.clientWidth || 800, container.clientHeight || 380);
-                        }
-                        window.addEventListener('resize', handleResize);
-                        // initial fit + ensure visible
-                        setTimeout(() => {
-                            if (container.clientWidth) chart.resize(container.clientWidth, container.clientHeight || 380);
-                            try { chart.timeScale().fitContent(); } catch(e) {}
-                        }, 80);
-                    } catch (err) {
-                        console.error('TradingView chart creation error:', err);
-                        container.innerHTML = '<div style="padding:12px;color:#b91c1c;font-size:12px;background:#fef2f2;border-radius:6px;">累计权益曲线创建出错，请刷新重试。</div>';
-                    }
-                }
-
-                if (typeof LightweightCharts !== 'undefined' && typeof LightweightCharts.createChart === 'function') {
-                    doCreate();
-                } else {
-                    // retry a few times in case of CDN timing (rare)
-                    let attempts = 0;
-                    const iv = setInterval(() => {
-                        attempts++;
-                        if (typeof LightweightCharts !== 'undefined' && typeof LightweightCharts.createChart === 'function') {
-                            clearInterval(iv);
-                            doCreate();
-                        } else if (attempts > 12) {
-                            clearInterval(iv);
-                            console.warn('TradingView lightweight-charts failed to load');
-                            container.innerHTML = '<div style="padding:12px;color:#666;font-size:12px;">TradingView 图表库加载失败，请检查网络后刷新。</div>';
-                        }
-                    }, 100);
-                }
+                waitForCharts(() => initMultiLineChart('tv-equity-chart', tvEquityData, {
+                    height: 380,
+                    lineWidth: (name) => name === '策略' ? 3 : 2,
+                    chartOpts: { rightPriceScale: { scaleMargins: { top: 0.1, bottom: 0.1 } }, legend: { visible: true, position: 'top' } },
+                    errorMsg: '累计权益曲线创建出错，请刷新重试。',
+                }), container, 'TradingView 图表库加载失败，请检查网络后刷新。');
             }
 
             function initTradingViewDrawdown() {
-                const container = document.getElementById('tv-drawdown-chart');
-                if (!container || typeof LightweightCharts === 'undefined' || !tvDrawdownSeries || Object.keys(tvDrawdownSeries).length === 0) {
-                    return;
-                }
-                try {
-                    const chart = LightweightCharts.createChart(container, {
-                        width: container.clientWidth || 800,
-                        height: container.clientHeight || 240,
-                        layout: {
-                            background: { color: '#ffffff' },
-                            textColor: '#374151',
-                        },
-                        grid: {
-                            vertLines: { color: '#f3f4f6' },
-                            horzLines: { color: '#f3f4f6' },
-                        },
-                        timeScale: {
-                            borderColor: '#e5e7eb',
-                            timeVisible: false,
-                            secondsVisible: false,
-                        },
-                        rightPriceScale: {
-                            borderColor: '#e5e7eb',
-                        },
-                        crosshair: {
-                            mode: 0,
-                            vertLine: { color: '#d1d5db', width: 1, style: 3 },
-                            horzLine: { color: '#d1d5db', width: 1, style: 3 },
-                        },
-                    });
-
-                    Object.keys(tvDrawdownSeries).forEach(name => {
-                        const data = tvDrawdownSeries[name];
-                        if (!data || data.length === 0) return;
-                        const color = chartColors[name] || '#6b7280';
-                        const series = chart.addLineSeries({
-                            color: color,
-                            lineWidth: name === '策略' ? 2 : 1.5,
-                            title: name,
-                        });
-                        series.setData(data);
-                    });
-
-                    function handleResize() {
-                        chart.resize(container.clientWidth || 800, container.clientHeight || 240);
-                    }
-                    window.addEventListener('resize', handleResize);
-                    setTimeout(() => {
-                        if (container.clientWidth) chart.resize(container.clientWidth, container.clientHeight || 240);
-                        try { chart.timeScale().fitContent(); } catch(e) {}
-                    }, 80);
-                } catch (err) {
-                    console.error('TV drawdown error:', err);
-                    container.innerHTML = '<div style="padding:12px;color:#b91c1c;font-size:12px;background:#fef2f2;border-radius:6px;">回撤图表创建出错，请刷新。</div>';
-                }
+                initMultiLineChart('tv-drawdown-chart', tvDrawdownSeries, { errorMsg: '回撤图表创建出错，请刷新。' });
             }
 
             function initTradingViewMonthly() {
-                const container = document.getElementById('tv-monthly-chart');
-                if (!container || typeof LightweightCharts === 'undefined' || !tvMonthlyData || tvMonthlyData.length === 0) {
-                    return;
-                }
-                try {
-                    const chart = LightweightCharts.createChart(container, {
-                        width: container.clientWidth || 800,
-                        height: container.clientHeight || 240,
-                        layout: {
-                            background: { color: '#ffffff' },
-                            textColor: '#374151',
-                        },
-                        grid: {
-                            vertLines: { color: '#f3f4f6' },
-                            horzLines: { color: '#f3f4f6' },
-                        },
-                        timeScale: {
-                            borderColor: '#e5e7eb',
-                            timeVisible: false,
-                            secondsVisible: false,
-                        },
-                        rightPriceScale: {
-                            borderColor: '#e5e7eb',
-                        },
-                        crosshair: {
-                            mode: 0,
-                            vertLine: { color: '#d1d5db', width: 1, style: 3 },
-                            horzLine: { color: '#d1d5db', width: 1, style: 3 },
-                        },
-                    });
-
-                    const series = chart.addHistogramSeries({
-                        title: '策略月度回报',
-                    });
-                    const coloredData = tvMonthlyData.map(d => ({
-                        time: d.time,
-                        value: d.value,
-                        color: d.value >= 0 ? '#22c55e' : '#ef4444'
-                    }));
-                    series.setData(coloredData);
-
-                    function handleResize() {
-                        chart.resize(container.clientWidth || 800, container.clientHeight || 240);
-                    }
-                    window.addEventListener('resize', handleResize);
-                    setTimeout(() => {
-                        if (container.clientWidth) chart.resize(container.clientWidth, container.clientHeight || 240);
-                        try { chart.timeScale().fitContent(); } catch(e) {}
-                    }, 80);
-                } catch (err) {
-                    console.error('TV monthly error:', err);
-                    container.innerHTML = '<div style="padding:12px;color:#b91c1c;font-size:12px;background:#fef2f2;border-radius:6px;">月度回报图表创建出错，请刷新。</div>';
-                }
+                const coloredData = tvMonthlyData.map(d => ({ time: d.time, value: d.value, color: d.value >= 0 ? '#22c55e' : '#ef4444' }));
+                initHistogramChart('tv-monthly-chart', coloredData, { title: '策略月度回报', errorMsg: '月度回报图表创建出错，请刷新。' });
             }
 
             function initTradingViewDDDist() {
-                const container = document.getElementById('tv-dd-dist-chart');
-                if (!container || typeof LightweightCharts === 'undefined' || !tvDDDistData || tvDDDistData.length === 0) {
-                    return;
-                }
-                try {
-                    const chart = LightweightCharts.createChart(container, {
-                        width: container.clientWidth || 800,
-                        height: container.clientHeight || 240,
-                        layout: {
-                            background: { color: '#ffffff' },
-                            textColor: '#374151',
-                        },
-                        grid: {
-                            vertLines: { color: '#f3f4f6' },
-                            horzLines: { color: '#f3f4f6' },
-                        },
-                        timeScale: {
-                            borderColor: '#e5e7eb',
-                            timeVisible: false,
-                            secondsVisible: false,
-                            tickMarkFormatter: (time, tickMarkType, locale) => {
-                                return ((time - 100000) / 100).toFixed(1) + '%';
-                            },
-                        },
-                        rightPriceScale: {
-                            borderColor: '#e5e7eb',
-                        },
-                    });
-
-                    const series = chart.addHistogramSeries({
-                        title: '回撤分布',
-                        color: '#ef4444',
-                    });
-                    series.setData(tvDDDistData);
-
-                    function handleResize() {
-                        chart.resize(container.clientWidth || 800, container.clientHeight || 240);
-                    }
-                    window.addEventListener('resize', handleResize);
-                    setTimeout(() => {
-                        if (container.clientWidth) chart.resize(container.clientWidth, container.clientHeight || 240);
-                        try { chart.timeScale().fitContent(); } catch(e) {}
-                    }, 80);
-                } catch (err) {
-                    console.error('TV DD dist error:', err);
-                    container.innerHTML = '<div style="padding:4px;color:#666;font-size:10px;">回撤分布图表出错。</div>';
-                }
+                initHistogramChart('tv-dd-dist-chart', tvDDDistData, {
+                    title: '回撤分布', color: '#ef4444',
+                    chartOpts: { timeScale: { ...TV_BASE.timeScale, tickMarkFormatter: (time) => ((time - 100000) / 100).toFixed(1) + '%' } },
+                    errorMsg: '回撤分布图表出错。',
+                });
             }
 
             async function fetchYahooCloses(ticker, startDateStr) {
@@ -1029,125 +889,64 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
             function updateMTDLive(ticker, mtd) {
                 if (!window.liveMTDs) window.liveMTDs = { ...mtdReturnsReport };
                 window.liveMTDs[ticker] = mtd;
-                refreshMTD();
+                if (window.refreshMTD) window.refreshMTD();
             }
 
             async function initLatestKChart() {
                 const container = document.getElementById('tv-latest-kchart');
-                if (!container || typeof LightweightCharts === 'undefined' || !latestKMetadata || !latestKMetadata.tickers || latestKMetadata.tickers.length === 0) {
-                    return;
-                }
+                if (!container || !latestKMetadata?.tickers?.length) return;
                 try {
-                    const chart = LightweightCharts.createChart(container, {
-                        width: container.clientWidth || 800,
-                        height: 260,
-                        layout: {
-                            background: { color: '#ffffff' },
-                            textColor: '#374151',
-                        },
-                        grid: {
-                            vertLines: { color: '#f3f4f6' },
-                            horzLines: { color: '#f3f4f6' },
-                        },
-                        timeScale: {
-                            borderColor: '#e5e7eb',
-                            timeVisible: false,
-                            secondsVisible: false,
-                            rightOffset: 3,
-                            barSpacing: 18,
-                            minBarWidth: 4,
-                        },
-                        rightPriceScale: {
-                            borderColor: '#e5e7eb',
-                        },
+                    const chart = createTVChart(container, 260, {
+                        timeScale: { ...TV_BASE.timeScale, rightOffset: 3, barSpacing: 18, minBarWidth: 4 },
                     });
-
-                    const colors = ["#22c55e", "#3b82f6", "#f59e0b", "#8b5cf6", "#ec4899"];
+                    if (!chart) return;
+                    const colors = ['#22c55e', '#3b82f6', '#f59e0b', '#8b5cf6', '#ec4899'];
                     const seriesMap = {};
                     latestKMetadata.tickers.forEach((t, i) => {
-                        const s = chart.addLineSeries({
-                            color: colors[i % colors.length],
-                            lineWidth: 2,
-                            title: t,
-                        });
+                        const s = chart.addLineSeries({ color: colors[i % colors.length], lineWidth: 2, title: t });
                         seriesMap[t] = s;
-                        // initial fallback from report data
-                        if (latestKFallback && latestKFallback[t]) {
-                            s.setData(latestKFallback[t]);
-                        }
+                        if (latestKFallback?.[t]) s.setData(latestKFallback[t]);
                     });
-
-                    // Fit early so fallback data (if no live) spreads across the chart nicely
                     try { chart.timeScale().fitContent(); } catch(e) {}
-
-                    // initial MTD from report (equal weight avg)
                     if (window.liveMTDs === undefined) window.liveMTDs = { ...mtdReturnsReport };
-                    function refreshMTD() {
+                    window.refreshMTD = function() {
                         const vals = Object.values(window.liveMTDs);
-                        const avg = vals.length ? vals.reduce((a,b)=>a+b,0) / vals.length : 0;
+                        const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
                         const el = document.getElementById('mtd-live');
                         if (el) {
-                            const pctStr = (avg*100).toFixed(1);
+                            const pctStr = (avg * 100).toFixed(1);
                             const numClass = avg >= 0 ? 'text-emerald-600' : 'text-rose-600';
                             el.innerHTML = `<span class="${numClass}">${pctStr}%</span> <span class="text-[9px] text-[#888]">(实时)</span>`;
                         }
-                    }
-                    refreshMTD();
-
-                    const fetches = latestKMetadata.tickers.map(async (t) => {
+                    };
+                    window.refreshMTD();
+                    await Promise.all(latestKMetadata.tickers.map(async (t) => {
                         try {
                             const firstClose = latestKMetadata.firstCloses[t];
-                            const start = latestKMetadata.startDate;
-                            const closes = await fetchYahooCloses(t, start);
+                            const closes = await fetchYahooCloses(t, latestKMetadata.startDate);
                             if (closes.length > 0 && firstClose) {
-                                const seriesData = closes.map(d => ({
-                                    time: d.time,
-                                    value: d.value / firstClose - 1
-                                }));
+                                const seriesData = closes.map(d => ({ time: d.time, value: d.value / firstClose - 1 }));
                                 seriesMap[t].setData(seriesData);
-                                const liveMTD = seriesData[seriesData.length - 1].value;
-                                updateMTDLive(t, liveMTD);
+                                updateMTDLive(t, seriesData[seriesData.length - 1].value);
                             }
                         } catch (e) {
-                            console.warn('Live fetch failed for ' + t + ', keeping report MTD', e);
+                            console.warn('Live fetch failed for ' + t, e);
                         }
-                    });
-                    await Promise.all(fetches);
-                    chart.timeScale().fitContent();
-
-                    // Extra delayed resize + fit (consistent with other TV charts) to ensure
-                    // layout is settled and the short ~10-day series is spread out, not crammed right.
-                    setTimeout(() => {
-                        if (container && container.clientWidth) {
-                            chart.resize(container.clientWidth, 260);
-                        }
-                        try { chart.timeScale().fitContent(); } catch(e) {}
-                    }, 80);
+                    }));
+                    bindChartResize(chart, container, 260);
                 } catch (err) {
                     console.error('TV latest K error:', err);
                     container.innerHTML = '<div style="padding:4px;color:#666;font-size:10px;">走势图表出错，使用报告数据。</div>';
                 }
             }
 
-            // initial: default to 2026 + filter + TV
             function initializeAll() {
-                // set default year to 2026 and filter cards
                 const sel = document.getElementById('year-select');
                 if (sel) {
-                    // prefer 2026 if option exists, else first
                     const opts = Array.from(sel.options).map(o => o.value);
-                    if (opts.includes('2026')) {
-                        sel.value = '2026';
-                    } else if (opts.length > 0) {
-                        sel.value = opts[0];
-                    }
+                    sel.value = opts.includes(defaultYear) ? defaultYear : (opts[0] || '');
                     filterByYear();
                 }
-
-                // clear or set initial return display (filterByYear handles for default year)
-                console.log('%c[Report] Performance report ready (TV charts + default 2026 holdings)', 'color:#64748b');
-
-                // init TV charts a little later for layout
                 setTimeout(initTradingViewEquity, 120);
                 setTimeout(initTradingViewDrawdown, 150);
                 setTimeout(initTradingViewMonthly, 150);
@@ -1166,21 +965,22 @@ def generate_backtest_html(df_summary: pd.DataFrame, df_detail: pd.DataFrame, ou
     print(f"[info] HTML 已生成 → index.html")
 
 def _calculate_metrics(returns: pd.Series) -> dict:
-    """计算回测指标（已增强边界情况防护）"""
+    """计算回测指标（原生实现，无需 QuantStats）"""
+    _keys = [
+        "total_return", "cagr", "volatility", "sharpe", "sortino",
+        "worst_monthly_return", "calmar", "win_rate", "median_return",
+        "profit_factor", "max_drawdown",
+    ]
     rets = returns.dropna()
     if len(rets) == 0:
-        return {k: 0.0 for k in ["total_return", "cagr", "volatility", "sharpe", "sortino",
-                                  "worst_monthly_return", "calmar", "win_rate", "median_return"]}
+        return {k: 0.0 for k in _keys}
 
     total_return = (1 + rets).prod() - 1
     n_months = len(rets)
     cagr = (1 + total_return) ** (12 / n_months) - 1 if n_months > 0 else 0.0
     volatility = rets.std() * np.sqrt(12) if n_months > 1 else 0.0
-
-    # 夏普比率（无风险利率假设为0）
     sharpe = cagr / volatility if volatility > 1e-12 else 0.0
 
-    # 索提诺比率：仅使用负收益标准差，防护空序列 / 零波动
     negative_rets = rets[rets < 0]
     if len(negative_rets) >= 2:
         downside = negative_rets.std() * np.sqrt(12)
@@ -1188,16 +988,16 @@ def _calculate_metrics(returns: pd.Series) -> dict:
     else:
         sortino = 0.0
 
-    # 最差月度回报
     worst_monthly_return = rets.min()
-    # Calmar 比率防护
-    if abs(worst_monthly_return) > 1e-12:
-        calmar = cagr / abs(worst_monthly_return)
-    else:
-        calmar = 0.0
+    calmar = cagr / abs(worst_monthly_return) if abs(worst_monthly_return) > 1e-12 else 0.0
 
-    win_rate = (rets > 0).mean()
-    median_return = rets.median()
+    gains = rets[rets > 0].sum()
+    losses = abs(rets[rets < 0].sum())
+    profit_factor = gains / losses if losses > 1e-12 else (99.99 if gains > 0 else 0.0)
+
+    equity = (1 + rets).cumprod()
+    peak = equity.cummax()
+    max_drawdown = ((equity - peak) / peak).min()
 
     return {
         "total_return": total_return,
@@ -1207,8 +1007,10 @@ def _calculate_metrics(returns: pd.Series) -> dict:
         "sortino": sortino,
         "worst_monthly_return": worst_monthly_return,
         "calmar": calmar,
-        "win_rate": win_rate,
-        "median_return": median_return,
+        "win_rate": (rets > 0).mean(),
+        "median_return": rets.median(),
+        "profit_factor": profit_factor,
+        "max_drawdown": max_drawdown,
     }
 
 

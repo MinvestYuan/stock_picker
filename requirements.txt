@@ -15,5 +15,3 @@ xlsxwriter>=3.1.0
 # pip install pyarrow
 # （pandas 会自动使用 pyarrow 或 fastparquet 任一可用的引擎）
 
-# QuantStats 用于生成专业的投资组合分析报告
-quantstats>=0.0.62
