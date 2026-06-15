@@ -144,6 +144,10 @@ def main() -> int:
         val = _extract_json(key, html)
         if val:
             mtd_snapshot = mtd_snapshot or {}
+            if out_key == "metadata" and isinstance(val, dict):
+                opens = val.get("firstOpens") or val.get("firstCloses")
+                if opens:
+                    val = {**val, "firstOpens": opens}
             mtd_snapshot[out_key] = val
     if mtd_snapshot and mtd_snapshot.get("returns"):
         rets = mtd_snapshot["returns"].values()

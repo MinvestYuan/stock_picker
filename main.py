@@ -22,7 +22,7 @@ from data.data_fetcher import (
     DEFAULT_MIN_MARKET_CAP,
 )
 from strategy.stock_selector import score_universe, pick_rows_to_frame
-from backtest.tester import backtest_nport_monthly  # backtest_monthly_returns 为遗留接口，已默认固定2020-01
+from backtest.tester import backtest_nport_monthly, open_at  # backtest_monthly_returns 为遗留接口，已默认固定2020-01
 from data.nport_universe import (
     get_latest_universe,
     get_all_nport_tickers,
@@ -223,8 +223,8 @@ def _add_benchmark_returns(df_summary: pd.DataFrame, price_map: dict, benchmark_
         buy = pd.to_datetime(row["buy_date"])
         sell = pd.to_datetime(row["sell_date"])
         try:
-            buy_price = float(b_df.loc[buy, "close"])
-            sell_price = float(b_df.loc[sell, "close"])
+            buy_price = open_at(b_df, buy)
+            sell_price = open_at(b_df, sell)
             ret = (sell_price / buy_price) - 1.0
         except KeyError:
             ret = 0.0
@@ -424,7 +424,7 @@ def generate_backtest_html(
     latest_k_metadata = {
         "tickers": top5_tickers,
         "startDate": buy_date.strftime("%Y-%m-%d"),
-        "firstCloses": {}
+        "firstOpens": {}
     }
     latest_k_fallback = {}
     mtd_returns = {}
@@ -432,10 +432,11 @@ def generate_backtest_html(
         if price_map and t in price_map:
             ohlc = price_map[t]
             try:
-                month_df = ohlc.loc[buy_date.strftime("%Y-%m-%d"): sell_date.strftime("%Y-%m-%d")]
+                end_date = min(sell_date, ohlc.index.max())
+                month_df = ohlc.loc[buy_date.strftime("%Y-%m-%d"): end_date.strftime("%Y-%m-%d")]
                 if len(month_df) > 0:
-                    first = float(month_df["close"].iloc[0])
-                    latest_k_metadata["firstCloses"][t] = first
+                    first = open_at(ohlc, buy_date)
+                    latest_k_metadata["firstOpens"][t] = first
                     latest_k_fallback[t] = [
                         {"time": d.strftime("%Y-%m-%d"), "value": float(row["close"] / first - 1)}
                         for d, row in month_df.iterrows()
@@ -816,8 +817,8 @@ def generate_backtest_html(
                         <thead>
                             <tr>
                                 <th>标的</th>
-                                <th>买入价</th>
-                                <th>卖出价</th>
+                                <th>买入开盘价</th>
+                                <th>卖出开盘价</th>
                                 <th>回报</th>
                             </tr>
                         </thead>
@@ -1062,10 +1063,10 @@ def generate_backtest_html(
                     window.refreshMTD();
                     await Promise.all(latestKMetadata.tickers.map(async (t) => {
                         try {
-                            const firstClose = latestKMetadata.firstCloses[t];
+                            const firstOpen = (latestKMetadata.firstOpens || latestKMetadata.firstCloses || {})[t];
                             const closes = await fetchYahooCloses(t, latestKMetadata.startDate);
-                            if (closes.length > 0 && firstClose) {
-                                const seriesData = closes.map(d => ({ time: d.time, value: d.value / firstClose - 1 }));
+                            if (closes.length > 0 && firstOpen) {
+                                const seriesData = closes.map(d => ({ time: d.time, value: d.value / firstOpen - 1 }));
                                 seriesMap[t].setData(seriesData);
                                 updateMTDLive(t, seriesData[seriesData.length - 1].value);
                             }

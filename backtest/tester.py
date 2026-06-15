@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Dict, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -7,6 +7,29 @@ import sys
 
 from data.data_fetcher import DEFAULT_BENCHMARK
 from strategy.stock_selector import score_universe
+
+
+def resolve_month_trade_dates(dates: pd.DatetimeIndex, month_str: str) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    """买入日 = 当月首个交易日；卖出日 = 下月首个交易日。"""
+    month_start = pd.to_datetime(month_str + "-01")
+    next_month_start = month_start + pd.offsets.MonthBegin(1)
+    month_dates = dates[(dates >= month_start) & (dates < next_month_start)]
+    if month_dates.empty:
+        return None
+    future_dates = dates[dates >= next_month_start]
+    if future_dates.empty:
+        return None
+    return month_dates[0], future_dates[0]
+
+
+def open_at(pseries: pd.DataFrame, dt: pd.Timestamp) -> float:
+    """取指定日期的开盘价；缺失时回退到收盘价。"""
+    row = pseries.loc[dt]
+    if isinstance(row, pd.DataFrame):
+        row = row.iloc[0]
+    if "open" in pseries.columns and pd.notna(row.get("open")):
+        return float(row["open"])
+    return float(row["close"])
 
 
 def backtest_nport_monthly(
@@ -35,14 +58,10 @@ def backtest_nport_monthly(
     detail_rows: List[dict] = []
 
     for month_str, universe in sorted(monthly_universes.items()):
-        month_start = pd.to_datetime(month_str + "-01")
-        next_month_start = month_start + pd.offsets.MonthBegin(1)
-        month_mask = (dates >= month_start) & (dates < next_month_start)
-        month_dates = dates[month_mask]
-        if len(month_dates) < 2:
+        trade_dates = resolve_month_trade_dates(dates, month_str)
+        if trade_dates is None:
             continue
-        buy_date = month_dates[0]
-        sell_date = month_dates[-1]
+        buy_date, sell_date = trade_dates
         selection_date = buy_date - pd.Timedelta(days=1)
         available_dates = dates[dates <= selection_date]
         if available_dates.empty:
@@ -97,8 +116,8 @@ def backtest_nport_monthly(
                 continue
             pseries = price_map[ticker]
             try:
-                buy_price = float(pseries.loc[buy_date, "close"])
-                sell_price = float(pseries.loc[sell_date, "close"])
+                buy_price = open_at(pseries, buy_date)
+                sell_price = open_at(pseries, sell_date)
                 ret = (sell_price / buy_price) - 1.0
                 rets.append(ret)
                 selected.append(ticker)
@@ -192,13 +211,11 @@ def backtest_monthly_returns(
     detail_rows: List[dict] = []
 
     for month_start in month_starts:
-        next_month_start = month_start + pd.offsets.MonthBegin(1)
-        month_mask = (dates >= month_start) & (dates < next_month_start)
-        month_dates = dates[month_mask]
-        if len(month_dates) < 2:
+        month_str = month_start.strftime("%Y-%m")
+        trade_dates = resolve_month_trade_dates(dates, month_str)
+        if trade_dates is None:
             continue
-        buy_date = month_dates[0]
-        sell_date = month_dates[-1]
+        buy_date, sell_date = trade_dates
         selection_date = buy_date - pd.Timedelta(days=1)
         available_dates = dates[dates <= selection_date]
         if available_dates.empty:
@@ -219,14 +236,14 @@ def backtest_monthly_returns(
                 continue
             pseries = price_map[ticker]
             try:
-                buy_price = float(pseries.loc[buy_date, "close"])
-                sell_price = float(pseries.loc[sell_date, "close"])
+                buy_price = open_at(pseries, buy_date)
+                sell_price = open_at(pseries, sell_date)
                 ret = (sell_price / buy_price) - 1.0
                 rets.append(ret)
                 selected.append(ticker)
 
                 detail_rows.append({
-                    "month": month_start.strftime("%Y-%m"),
+                    "month": month_str,
                     "ticker": ticker,
                     "buy_date": buy_date.date().isoformat(),
                     "buy_price": round(buy_price, 4),
@@ -242,7 +259,7 @@ def backtest_monthly_returns(
 
         monthly_ret = float(np.mean(rets))
         summary_rows.append({
-            "month": month_start.strftime("%Y-%m"),
+            "month": month_str,
             "asof_date": asof_date.date().isoformat(),
             "buy_date": buy_date.date().isoformat(),
             "sell_date": sell_date.date().isoformat(),
