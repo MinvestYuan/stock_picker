@@ -500,14 +500,25 @@ def generate_backtest_html(
     # 修复：本月收益率优先使用 next_picks（当前策略选股），而不是回测最后一月的持仓
     if next_picks:
         top5_tickers = [p.ticker for p in next_picks]
-        buy_date = next_trade_date if next_trade_date else pd.to_datetime(df_summary["buy_date"].iloc[-1])
-        # 本月结束日期 = 今天或最新数据日期（因为本月还未结束）
+        # sell_date = 今天或最新数据日期（因为本月还未结束）
         sell_date = pd.Timestamp.now().normalize()
         if price_map and benchmark in price_map:
             bm_max = price_map[benchmark].index.max()
             if hasattr(bm_max, "tz") and bm_max.tz is not None:
                 bm_max = bm_max.tz_localize(None)
             sell_date = min(sell_date, bm_max)
+        # buy_date：优先 next_trade_date，但如果它还没到（> sell_date），
+        # 则 fallback 到本月第一个有数据的交易日
+        if next_trade_date and next_trade_date <= sell_date:
+            buy_date = next_trade_date
+        else:
+            month_start = pd.to_datetime(datetime.now().strftime("%Y-%m-01"))
+            buy_date = month_start
+            if price_map and benchmark in price_map:
+                bm_dates = price_map[benchmark].index
+                valid = bm_dates[(bm_dates >= month_start) & (bm_dates <= sell_date)]
+                if len(valid) > 0:
+                    buy_date = valid[0]
     else:
         latest_month = df_summary["month"].iloc[-1]
         if df_detail.empty or "month" not in df_detail.columns:
@@ -530,9 +541,16 @@ def generate_backtest_html(
             ohlc = price_map[t]
             try:
                 end_date = min(sell_date, ohlc.index.max())
-                month_df = ohlc.loc[buy_date.strftime("%Y-%m-%d"): end_date.strftime("%Y-%m-%d")]
+                # 找到该股票在 buy_date 之后第一个有数据的交易日（处理停牌等）
+                valid_dates = ohlc.index[ohlc.index >= buy_date]
+                if len(valid_dates) == 0:
+                    continue
+                actual_buy_date = valid_dates[0]
+                if actual_buy_date > end_date:
+                    continue
+                month_df = ohlc.loc[actual_buy_date.strftime("%Y-%m-%d"): end_date.strftime("%Y-%m-%d")]
                 if len(month_df) > 0:
-                    first = open_at(ohlc, buy_date)
+                    first = open_at(ohlc, actual_buy_date)
                     latest_k_metadata["firstOpens"][t] = first
                     latest_k_fallback[t] = [
                         {"time": d.strftime("%Y-%m-%d"), "value": float(row["close"] / first - 1)}
