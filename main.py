@@ -497,15 +497,27 @@ def generate_backtest_html(
         ]
 
     # Latest month top 5 stocks MTD yield trend data (for browser live update)
-    latest_month = df_summary["month"].iloc[-1]
-    if df_detail.empty or "month" not in df_detail.columns:
-        top5_tickers = []
+    # 修复：本月收益率优先使用 next_picks（当前策略选股），而不是回测最后一月的持仓
+    if next_picks:
+        top5_tickers = [p.ticker for p in next_picks]
+        buy_date = next_trade_date if next_trade_date else pd.to_datetime(df_summary["buy_date"].iloc[-1])
+        # 本月结束日期 = 今天或最新数据日期（因为本月还未结束）
+        sell_date = pd.Timestamp.now().normalize()
+        if price_map and benchmark in price_map:
+            bm_max = price_map[benchmark].index.max()
+            if hasattr(bm_max, "tz") and bm_max.tz is not None:
+                bm_max = bm_max.tz_localize(None)
+            sell_date = min(sell_date, bm_max)
     else:
-        latest_details = df_detail[df_detail["month"] == latest_month]
-        top5_tickers = latest_details["ticker"].head(5).tolist()
-    latest_row = df_summary[df_summary["month"] == latest_month].iloc[0]
-    buy_date = pd.to_datetime(latest_row["buy_date"])
-    sell_date = pd.to_datetime(latest_row["sell_date"])
+        latest_month = df_summary["month"].iloc[-1]
+        if df_detail.empty or "month" not in df_detail.columns:
+            top5_tickers = []
+        else:
+            latest_details = df_detail[df_detail["month"] == latest_month]
+            top5_tickers = latest_details["ticker"].head(5).tolist()
+        latest_row = df_summary[df_summary["month"] == latest_month].iloc[0]
+        buy_date = pd.to_datetime(latest_row["buy_date"])
+        sell_date = pd.to_datetime(latest_row["sell_date"])
     latest_k_metadata = {
         "tickers": top5_tickers,
         "startDate": buy_date.strftime("%Y-%m-%d"),
