@@ -17,6 +17,7 @@ from data.data_fetcher import (
     fetch_or_update_history,
     get_cache_data_max_age_days,
     price_map_needs_ohlc_refresh,
+    _get_latest_trading_day,
     DEFAULT_HISTORY_FILE,
     DEFAULT_BENCHMARK,
     DEFAULT_DURATION,
@@ -102,16 +103,19 @@ def _load_or_update_prices(tickers, args, cache_file, duration=None):
             "[warn] 检测到旧版收盘价缓存（open=close），将从 IB 全量刷新真实 OHLC 数据",
             file=sys.stderr,
         )
-    # 同一天重复运行保护（以本地仓库 mtime 为准）：如果价格缓存文件今天已更新过，直接跳过 IB 增量部分
+    # 同一天重复运行保护：如果缓存中 benchmark 数据已覆盖到最近一个交易日，直接跳过 IB 增量部分
     # 避免用户多次运行 backtest 时反复看到“需要从 IB 获取/更新数据：N 只”
-    # 第一次运行当天会正常做 trading-day 追平，之后同日运行使用缓存。
     elif price_map and cache_file.exists():
         try:
-            mtime = datetime.fromtimestamp(cache_file.stat().st_mtime)
-            age_days = (datetime.now() - mtime).days
-            if age_days == 0:
-                print(f"[info] 价格缓存今天已更新（文件 {age_days} 天前），跳过重复从 IB Gateway 增量更新（使用缓存数据）", file=sys.stderr)
-                return price_map
+            bm_df = price_map.get(DEFAULT_BENCHMARK)
+            if bm_df is not None and not bm_df.empty:
+                bm_max = bm_df.index.max()
+                if hasattr(bm_max, "tz") and bm_max.tz is not None:
+                    bm_max = bm_max.tz_localize(None)
+                latest_trading_day = _get_latest_trading_day()
+                if bm_max >= latest_trading_day:
+                    print(f"[info] 价格缓存数据已覆盖至最新交易日 {latest_trading_day.date()}，跳过重复从 IB Gateway 增量更新（使用缓存数据）", file=sys.stderr)
+                    return price_map
         except Exception:
             pass
 
