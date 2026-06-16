@@ -24,7 +24,7 @@ from data.data_fetcher import (
     DEFAULT_MIN_MARKET_CAP,
 )
 from strategy.stock_selector import score_universe, pick_rows_to_frame
-from backtest.tester import backtest_nport_monthly, open_at  # backtest_monthly_returns 为遗留接口，已默认固定2020-01
+from backtest.tester import backtest_nport_monthly, open_at, resolve_month_trade_dates  # backtest_monthly_returns 为遗留接口，已默认固定2020-01
 from data.nport_universe import (
     get_latest_universe,
     get_all_nport_tickers,
@@ -224,13 +224,55 @@ def cmd_dashboard(args) -> int:
     else:
         print(f"[info] 下个开盘日 ({next_trade_date.date() if next_trade_date else 'N/A'}) 信号: 持现金 (QQQ 50MA < 200MA) 或无可选股", file=sys.stderr)
 
-    # 8. 生成 HTML 报告（统一为单一 HTML 文件，不再生成 Excel）
+    # 8. 计算本月（当前月）的月初选股，用于 HTML 中"本月收益率"的 MTD 展示
+    # 确保"本月收益率"反映的是月初就定下的持仓从月初买入持有至今的收益，
+    # 避免使用最新未来信号回望导致的前视偏差。
+    current_month_str = datetime.now().strftime("%Y-%m")
+    current_month_picks = None
+    current_month_buy_date = None
+    if current_month_str in monthly_universes:
+        bm_dates = price_map[args.benchmark].index.sort_values()
+        td = resolve_month_trade_dates(bm_dates, current_month_str)
+        if td:
+            buy_date, _ = td
+            selection_date = buy_date - pd.Timedelta(days=1)
+            avail = bm_dates[bm_dates <= selection_date]
+            if not avail.empty:
+                asof_cm = avail.max()
+                uni = monthly_universes[current_month_str]
+                ff = {t: features[t] for t in uni if t in features}
+                if ff:
+                    ranked = score_universe(ff, asof_cm, momentum_col="momentum")
+                    # 应用与回测一致的 QQQ 熊市保护
+                    qqq_bear = False
+                    if "QQQ" in price_map:
+                        qqq_raw = price_map["QQQ"]
+                        qqq_close = qqq_raw["close"] if isinstance(qqq_raw, pd.DataFrame) and "close" in qqq_raw.columns else qqq_raw
+                        qqq_ema50 = qqq_close.ewm(span=50, adjust=False).mean()
+                        qqq_ema200 = qqq_close.ewm(span=200, adjust=False).mean()
+                        try:
+                            q50 = float(qqq_ema50.loc[:asof_cm].iloc[-1])
+                            q200 = float(qqq_ema200.loc[:asof_cm].iloc[-1])
+                            qqq_bear = q50 < q200
+                        except Exception:
+                            qqq_bear = False
+                    if not qqq_bear:
+                        current_month_picks = ranked[:args.top_n]
+                        current_month_buy_date = buy_date
+                        picks_str = ", ".join(p.ticker for p in current_month_picks)
+                        print(f"[info] 本月 ({current_month_str}) 月初选股: {picks_str} (基于 {asof_cm.date()})", file=sys.stderr)
+                    else:
+                        print(f"[info] 本月 ({current_month_str}) 月初 QQQ 熊市保护，持现金", file=sys.stderr)
+
+    # 9. 生成 HTML 报告（统一为单一 HTML 文件，不再生成 Excel）
     output_path = args.output or Path("index.html")
     output_path = output_path.with_suffix(".html") if output_path.suffix.lower() != ".html" else output_path
     generate_backtest_html(
         df_summary, df_detail, output_path,
         benchmark=args.benchmark, extra_benchmarks=extra_benchmarks, price_map=price_map,
         next_picks=next_picks, next_trade_date=next_trade_date, asof_date=asof_date,
+        current_month_picks=current_month_picks,
+        current_month_buy_date=current_month_buy_date,
     )
     print(f"[info] HTML 已生成 → {output_path}", file=sys.stderr)
     return 0
@@ -356,6 +398,8 @@ def generate_backtest_html(
     next_picks: list | None = None,
     next_trade_date: pd.Timestamp | None = None,
     asof_date: pd.Timestamp | None = None,
+    current_month_picks: list | None = None,
+    current_month_buy_date: pd.Timestamp | None = None,
 ):
     """生成专业回测 HTML 仪表盘。
     包含：KPI卡片、权益曲线、回撤分布、月度回报、持仓表格、详细指标等。
@@ -421,6 +465,73 @@ def generate_backtest_html(
             'rrg_score': row.get('rrg_score', 0),
             'close_over_ema50': row.get('close_over_ema50', 0),
         })
+
+    # === 将当前月（未结束）持仓插入月度卡片 ===
+    current_month_str = datetime.now().strftime("%Y-%m")
+    if current_month_picks and current_month_str not in [m['month'] for m in monthly_data]:
+        buy_date_cm = current_month_buy_date
+        buy_date_str_cm = buy_date_cm.strftime("%Y-%m-%d") if buy_date_cm else ""
+        # 最新数据日期
+        latest_date_cm = pd.Timestamp.now().normalize()
+        if price_map and benchmark in price_map:
+            bm_max = price_map[benchmark].index.max()
+            if hasattr(bm_max, "tz") and bm_max.tz is not None:
+                bm_max = bm_max.tz_localize(None)
+            latest_date_cm = min(latest_date_cm, bm_max)
+        latest_date_str_cm = latest_date_cm.strftime("%Y-%m-%d")
+
+        cm_rets = []
+        for p in current_month_picks:
+            ticker = p.ticker
+            if price_map and ticker in price_map:
+                try:
+                    ohlc = price_map[ticker]
+                    valid_buy_dates = ohlc.index[ohlc.index >= buy_date_cm]
+                    if len(valid_buy_dates) == 0:
+                        continue
+                    actual_buy_date = valid_buy_dates[0]
+                    first = open_at(ohlc, actual_buy_date)
+                    valid_end_dates = ohlc.index[ohlc.index <= latest_date_cm]
+                    if len(valid_end_dates) == 0:
+                        continue
+                    last_date = valid_end_dates[-1]
+                    last = float(ohlc.loc[last_date, "close"])
+                    ret = (last / first - 1) if first != 0 else 0
+                    cm_rets.append(ret)
+
+                    details_by_month[current_month_str].append({
+                        'ticker': ticker,
+                        'buy_price': round(first, 4),
+                        'sell_price': round(last, 4),
+                        'monthly_return': round(ret, 6),
+                        'total_score': round(getattr(p, 'total_score', 0), 4),
+                        'momentum_score': round(getattr(p, 'momentum_score', 0), 4),
+                        'rrg_score': round(getattr(p, 'rrg_score', 0), 4),
+                        'close_over_ema50': round(getattr(p, 'close_over_ema50', 0), 4),
+                    })
+                except Exception:
+                    pass
+
+        cm_portfolio_ret = float(np.mean(cm_rets)) if cm_rets else 0.0
+        monthly_data.append({
+            'month': current_month_str,
+            'year': current_month_str[:4],
+            'buy_date': buy_date_str_cm,
+            'sell_date': f"{latest_date_str_cm} (持仓中)",
+            'num_stocks': len(cm_rets),
+            'monthly_return': cm_portfolio_ret,
+            'top_tickers': [p.ticker for p in current_month_picks],
+        })
+        monthly_data.sort(key=lambda x: x['month'])
+        years = sorted(set(m['year'] for m in monthly_data), reverse=True)
+        # 重新计算 annual_returns，使当前年包含当前月
+        for y in years:
+            year_ms = [m for m in monthly_data if m['year'] == y]
+            if year_ms:
+                ret = 1.0
+                for m in year_ms:
+                    ret *= (1 + m['monthly_return'])
+                annual_returns[y] = ret - 1
 
     # === 计算当年 YTD ===
     current_year = str(datetime.now().year)
@@ -497,8 +608,19 @@ def generate_backtest_html(
         ]
 
     # Latest month top 5 stocks MTD yield trend data (for browser live update)
-    # 修复：本月收益率优先使用 next_picks（当前策略选股），而不是回测最后一月的持仓
-    if next_picks:
+    # 修正：本月收益率使用月初选股（current_month_picks），确保反映的是月初
+    # 就定下的五个股票从月初买入持有至今的收益，避免用最新信号回望导致的前视偏差。
+    if current_month_picks:
+        top5_tickers = [p.ticker for p in current_month_picks]
+        buy_date = current_month_buy_date
+        # sell_date = 今天或最新数据日期（因为本月还未结束）
+        sell_date = pd.Timestamp.now().normalize()
+        if price_map and benchmark in price_map:
+            bm_max = price_map[benchmark].index.max()
+            if hasattr(bm_max, "tz") and bm_max.tz is not None:
+                bm_max = bm_max.tz_localize(None)
+            sell_date = min(sell_date, bm_max)
+    elif next_picks:
         top5_tickers = [p.ticker for p in next_picks]
         # sell_date = 今天或最新数据日期（因为本月还未结束）
         sell_date = pd.Timestamp.now().normalize()
