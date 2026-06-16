@@ -232,9 +232,12 @@ def cmd_dashboard(args) -> int:
     current_month_buy_date = None
     if current_month_str in monthly_universes:
         bm_dates = price_map[args.benchmark].index.sort_values()
-        td = resolve_month_trade_dates(bm_dates, current_month_str)
-        if td:
-            buy_date, _ = td
+        # 当前月不需要下月卖出日，resolve_month_trade_dates 会因找不到下月数据而返回 None
+        month_start = pd.to_datetime(current_month_str + "-01")
+        next_month_start = month_start + pd.offsets.MonthBegin(1)
+        month_dates = bm_dates[(bm_dates >= month_start) & (bm_dates < next_month_start)]
+        if not month_dates.empty:
+            buy_date = month_dates[0]
             selection_date = buy_date - pd.Timedelta(days=1)
             avail = bm_dates[bm_dates <= selection_date]
             if not avail.empty:
