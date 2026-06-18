@@ -179,21 +179,6 @@ def get_cache_data_max_age_days(price_map: Dict[str, pd.Series]) -> int | None:
     return int((now - max_date).days)
 
 
-# ==================== 失败 ticker 缓存（已禁用）====================
-# 为避免幸存者偏差（Survivorship Bias），不再持久化记录获取失败的 ticker。
-# 每次运行都会重新尝试获取所有需要的价格数据，确保退市/临时失败的
-# 股票不会被永久排除在回测之外。
-FAILED_PRICE_FILE = ROOT_DIR / "cache" / "failed_price_tickers.json"
-
-def load_failed_price_tickers() -> set[str]:
-    """（已禁用）始终返回空集合，不再读取持久化失败缓存。"""
-    return set()
-
-def save_failed_price_tickers(tickers: set[str]):
-    """（已禁用）不再写入失败缓存文件。"""
-    pass
-
-
 def save_price_cache(price_map: Dict[str, pd.Series], cache_file: Path):
     """
     保存价格缓存。
@@ -591,33 +576,6 @@ def fetch_or_update_history(
 
 
     return results
-
-
-# 保持原有接口完全兼容（旧代码无需修改）
-def fetch_daily_history(
-    ib: IB | None = None,
-    tickers: Sequence[str] = (),
-    end_date: pd.Timestamp | None = None,
-    duration: str = "1 Y",
-    pause_seconds: float = 0.25,
-    existing_price_map: Dict[str, pd.Series] | None = None,
-    host: str = "127.0.0.1",
-    port: int = 4001,
-    client_id: int = 17,
-    num_connections: int = 4,
-) -> Dict[str, pd.Series]:
-    return fetch_or_update_history(
-        ib=ib,
-        tickers=tickers,
-        end_date=end_date,
-        duration=duration,
-        pause_seconds=pause_seconds,
-        existing_price_map=existing_price_map,
-        host=host,
-        port=port,
-        client_id=client_id,
-        num_connections=num_connections,
-    )
 
 
 # ==================== 以下为原有函数（完全保持不变） ====================

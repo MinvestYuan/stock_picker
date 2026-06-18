@@ -6,11 +6,8 @@ import numpy as np
 import sys
 
 from data.data_fetcher import (
-    build_universe,
     connect_ib,
     prepare_all_features,
-    prepare_feature_frame,
-    resolve_asof_date,
     get_cache_filename,
     load_price_cache,
     save_price_cache,
@@ -23,14 +20,13 @@ from data.data_fetcher import (
     DEFAULT_DURATION,
     DEFAULT_MIN_MARKET_CAP,
 )
-from strategy.stock_selector import score_universe, pick_rows_to_frame
-from backtest.tester import backtest_nport_monthly, open_at, resolve_month_trade_dates  # backtest_monthly_returns 为遗留接口，已默认固定2020-01
-from data.nport_universe import (
+from strategy.stock_selector import score_universe
+from backtest.tester import backtest_nport_monthly, open_at
+from data.nport_data import (
+    sync_holdings_if_needed,
     get_latest_universe,
-    get_all_nport_tickers,
     get_monthly_universes,
 )
-from data.nport_data import sync_holdings_if_needed
 from data.ticker_resolver import TickerResolver
 from datetime import datetime
 
@@ -73,6 +69,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--use-cache", action=argparse.BooleanOptionalAction, default=True,
                         help="是否使用本地价格缓存（默认启用，使用 --no-use-cache 强制刷新）")
+    parser.add_argument("--cost", type=float, default=0.001,
+                        help="单边交易成本（默认0.001即0.1%%，含佣金+滑点）。每月换仓扣除双边成本=2*cost*持仓数。设为0则忽略。")
 
     # 新增：ticker 重解析命令参数
     parser.add_argument("--missing-only", action="store_true", help="仅解析缺失 ticker 的持仓")
@@ -196,6 +194,7 @@ def cmd_dashboard(args) -> int:
         monthly_universes=monthly_universes,
         benchmark_ticker=args.benchmark,
         top_n=args.top_n,
+        cost_per_trade=args.cost,
     )
 
     if df_summary.empty:
@@ -276,6 +275,7 @@ def cmd_dashboard(args) -> int:
         next_picks=next_picks, next_trade_date=next_trade_date, asof_date=asof_date,
         current_month_picks=current_month_picks,
         current_month_buy_date=current_month_buy_date,
+        cost_per_trade=args.cost,
     )
     print(f"[info] HTML 已生成 → {output_path}", file=sys.stderr)
     return 0
@@ -403,6 +403,7 @@ def generate_backtest_html(
     asof_date: pd.Timestamp | None = None,
     current_month_picks: list | None = None,
     current_month_buy_date: pd.Timestamp | None = None,
+    cost_per_trade: float = 0.001,
 ):
     """生成专业回测 HTML 仪表盘。
     包含：KPI卡片、权益曲线、回撤分布、月度回报、持仓表格、详细指标等。
@@ -499,7 +500,8 @@ def generate_backtest_html(
                         continue
                     last_date = valid_end_dates[-1]
                     last = float(ohlc.loc[last_date, "close"])
-                    ret = (last / first - 1) if first != 0 else 0
+                    # 与回测口径一致：持仓中只扣买入侧成本（尚未卖出）
+                    ret = (last / first - 1 - cost_per_trade) if first != 0 else 0
                     cm_rets.append(ret)
 
                     details_by_month[current_month_str].append({
@@ -682,7 +684,8 @@ def generate_backtest_html(
                         for d, row in month_df.iterrows()
                     ]
                     last = float(month_df["close"].iloc[-1])
-                    mtd = (last / first - 1) if first != 0 else 0
+                    # 与回测口径一致：持仓中只扣买入侧成本（尚未卖出）
+                    mtd = (last / first - 1 - cost_per_trade) if first != 0 else 0
                     mtd_returns[t] = mtd
             except Exception:
                 pass
@@ -723,6 +726,12 @@ def generate_backtest_html(
 
     default_year = current_year if current_year in years else years[0]
 
+    # 读取幸存者偏差诊断统计（来自 backtest_nport_monthly 附加的元数据）
+    surv_diag = df_summary.attrs.get("survivorship_diagnostic", {})
+    missing_pct = surv_diag.get("missing_pct", 0.0)
+    missing_slots = surv_diag.get("missing_slots", 0)
+    total_slots = surv_diag.get("total_pick_slots", 0)
+
     performance_kpis = [
         (f"{current_year} YTD", fmt_pct(ytd_return)),
         ("累计回报", fmt_pct(strategy_metrics.get("total_return", 0))),
@@ -737,6 +746,11 @@ def generate_backtest_html(
         ("最差月份", fmt_pct(strategy_metrics.get("worst_monthly_return", 0))),
         ("中位月回报", fmt_pct(strategy_metrics.get("median_return", 0))),
     ]
+    # 如果有幸存者偏差数据，添加为诊断指标
+    if total_slots > 0:
+        performance_kpis.append(
+            ("无价仓位占比", f"{missing_slots}/{total_slots} ({missing_pct:.1%})")
+        )
     benchmark_names = ["策略"] + [benchmark] + extra_benchmarks
 
     # 合并写入专业 HTML (Tailwind + lightweight-charts 现代仪表盘)
@@ -1381,25 +1395,31 @@ def _calculate_metrics(returns: pd.Series) -> dict:
     n_months = len(rets)
     cagr = (1 + total_return) ** (12 / n_months) - 1 if n_months > 0 else 0.0
     volatility = rets.std() * np.sqrt(12) if n_months > 1 else 0.0
-    sharpe = cagr / volatility if volatility > 1e-12 else 0.0
+
+    # 夏普/索提诺：用年化算术平均超额收益（标准定义），rf 默认 0。
+    # 之前用 CAGR/波动率属非标准口径，这里改为 mean*12，与常见工具一致。
+    ann_mean = rets.mean() * 12
+    sharpe = ann_mean / volatility if volatility > 1e-12 else 0.0
 
     negative_rets = rets[rets < 0]
     if len(negative_rets) >= 2:
         downside = negative_rets.std() * np.sqrt(12)
-        sortino = cagr / downside if downside > 1e-12 else 0.0
+        sortino = ann_mean / downside if downside > 1e-12 else 0.0
     else:
         sortino = 0.0
 
     worst_monthly_return = rets.min()
-    calmar = cagr / abs(worst_monthly_return) if abs(worst_monthly_return) > 1e-12 else 0.0
-
-    gains = rets[rets > 0].sum()
-    losses = abs(rets[rets < 0].sum())
-    profit_factor = gains / losses if losses > 1e-12 else (99.99 if gains > 0 else 0.0)
 
     equity = (1 + rets).cumprod()
     peak = equity.cummax()
     max_drawdown = ((equity - peak) / peak).min()
+
+    # Calmar = CAGR / 最大回撤（之前误用“最差单月”，会高估该比率）
+    calmar = cagr / abs(max_drawdown) if abs(max_drawdown) > 1e-12 else 0.0
+
+    gains = rets[rets > 0].sum()
+    losses = abs(rets[rets < 0].sum())
+    profit_factor = gains / losses if losses > 1e-12 else (99.99 if gains > 0 else 0.0)
 
     return {
         "total_return": total_return,

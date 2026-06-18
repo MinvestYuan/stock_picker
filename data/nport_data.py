@@ -704,7 +704,9 @@ def get_latest_universe() -> List[str]:
 def get_monthly_universes(start_month: str = "2020-01", end_month: str | None = None) -> Dict[str, List[str]]:
     """
     生成每月可用的 universe。
-    规则：使用 reportPeriodDate <= 该月末 的最新一期持仓。
+    规则：使用 filingDate < 该月1日（即交易前已公开披露）的最新一期持仓。
+    这避免了前视偏差——NPORT-P 通常在 reportPeriodDate 之后 ~60 天才公开，
+    不能在尚未披露时就使用该持仓数据做交易决策。
     优先使用 SQLite 数据。
     """
     cache = _load_holdings_cache()
@@ -716,12 +718,23 @@ def get_monthly_universes(start_month: str = "2020-01", end_month: str | None = 
         if not holdings:
             continue
         report_date = holdings[0].get("reportPeriodDate", "")
-        if report_date:
+        filing_date = holdings[0].get("filingDate", "")
+        if report_date and filing_date:
             filings.append({
                 "report_date": pd.to_datetime(report_date),
+                "filing_date": pd.to_datetime(filing_date),
+                "tickers": _extract_tickers(holdings),
+            })
+        elif report_date:
+            # 兼容旧数据：如果缺少 filingDate，用 reportPeriodDate + 60天估算
+            rd = pd.to_datetime(report_date)
+            filings.append({
+                "report_date": rd,
+                "filing_date": rd + pd.Timedelta(days=60),
                 "tickers": _extract_tickers(holdings),
             })
 
+    # 按 report_date 排序（用于选取"内容最新"的 filing）
     filings = sorted(filings, key=lambda x: x["report_date"])
 
     if end_month is None:
@@ -730,17 +743,16 @@ def get_monthly_universes(start_month: str = "2020-01", end_month: str | None = 
     month_starts = pd.date_range(start=start_month + "-01", end=end_month + "-01", freq="MS")
 
     result: Dict[str, List[str]] = {}
-    filing_idx = 0
 
     for month_start in month_starts:
-        month_end = month_start + pd.offsets.MonthEnd(1)
         month_str = month_start.strftime("%Y-%m")
 
-        while filing_idx < len(filings) - 1 and filings[filing_idx + 1]["report_date"] <= month_end:
-            filing_idx += 1
-
-        if filing_idx < len(filings) and filings[filing_idx]["report_date"] <= month_end:
-            result[month_str] = filings[filing_idx]["tickers"].copy()
+        # 只使用 filingDate < 该月1日 的 filing（确保在交易日前已公开披露）
+        # 从中选 report_date 最新的一期（内容最接近当前的持仓快照）
+        available = [f for f in filings if f["filing_date"] < month_start]
+        if available:
+            best = max(available, key=lambda x: x["report_date"])
+            result[month_str] = best["tickers"].copy()
 
     return result
 

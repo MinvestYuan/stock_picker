@@ -4,7 +4,7 @@
   - 买入：当月首个交易日开盘价
   - 卖出：下月首个交易日开盘价
 
-需本地 IB 价格缓存；与 main.py backtest 等价。
+需本地 IB 价格缓存；与 main.py dashboard 等价。
 """
 from __future__ import annotations
 
@@ -14,14 +14,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from main import cmd_russell_backtest, parse_args  # noqa: E402
+from main import cmd_dashboard, parse_args  # noqa: E402
 
 
 def main() -> int:
     args = parse_args()
-    args.command = "backtest"
+    args.command = "dashboard"
     args.output = ROOT / "index.html"
-    return cmd_russell_backtest(args)
+    return cmd_dashboard(args)
 
 
 if __name__ == "__main__":
