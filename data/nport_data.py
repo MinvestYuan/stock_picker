@@ -701,7 +701,7 @@ def get_latest_universe() -> List[str]:
     return _extract_tickers(latest_holdings)
 
 
-def get_monthly_universes(start_month: str = "2020-01", end_month: str | None = None) -> Dict[str, List[str]]:
+def get_monthly_universes(start_month: str = "2019-12", end_month: str | None = None) -> Dict[str, List[str]]:
     """
     生成每月可用的 universe。
     规则：使用 filingDate < 该月1日（即交易前已公开披露）的最新一期持仓。

@@ -65,7 +65,7 @@ def parse_args() -> argparse.Namespace:
                         help="并行使用的 IB 连接数（多连接同时获取不同股票数据，加速价格更新）。默认4（推荐，显著加快 backtest 的价格数据获取）。如果遇到 pacing 错误或想保守，可设为1。每个连接使用递增的 client-id。")
     parser.add_argument("--top", type=int, default=5)
     parser.add_argument("--top-n", type=int, default=5)
-    parser.add_argument("--start-month", default="2020-01", help="回测起始月份（默认固定为 2020-01，此后所有回测均从2020年开始；可覆盖）")
+    parser.add_argument("--start-month", default="2019-12", help="回测起始月份（默认 2019-12，对应最早可用的 NPORT 持仓数据；可覆盖）")
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--use-cache", action=argparse.BooleanOptionalAction, default=True,
                         help="是否使用本地价格缓存（默认启用，使用 --no-use-cache 强制刷新）")
@@ -146,9 +146,11 @@ def _load_or_update_prices(tickers, args, cache_file, duration=None):
 
 def cmd_dashboard(args) -> int:
     """Russell 1000 NPORT 持仓月度回测 + 前向信号 + 单一 HTML 报告"""
-    # 固定从 2020-01 开始回测（用户要求），--start-month 可用于覆盖
-    start_month = args.start_month or "2020-01"
-    print(f"[info] NPORT 持仓月度回测，起始月: {start_month}（固定从2020年开始）", file=sys.stderr)
+    # 默认从 2019-12 开始回测（最早可用的 NPORT 持仓数据），--start-month 可用于覆盖
+    # 注：NPORT-P 制度 2019 年才全面实施，IWB 最早一期 filing 公开于 2019-11-25，
+    # 因此更早的月份无 universe 数据，会被自动跳过。
+    start_month = args.start_month or "2019-12"
+    print(f"[info] NPORT 持仓月度回测，起始月: {start_month}", file=sys.stderr)
 
     # 自动检查持仓更新（核心需求；今天已查过SEC则直接跳过）
     print("[info] 正在检查 Russell 1000 ETF 持仓是否有更新...", file=sys.stderr)
