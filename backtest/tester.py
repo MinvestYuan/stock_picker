@@ -251,13 +251,14 @@ def backtest_nport_monthly(
                 file=sys.stderr,
             )
 
-    # 计算今年 (2026) YTD 收益
-    y2026 = df_summary[df_summary['month'].str.startswith('2026')]
-    if not y2026.empty:
-        ytd = (1 + y2026['monthly_return']).prod() - 1
-        print(f"2026 YTD 今年收益 : {ytd:.4%} (截至 {y2026['month'].iloc[-1]})")
+    # 计算最新年份的 YTD 收益（动态取数据中最新月份的年份，避免写死年份）
+    latest_year = df_summary['month'].iloc[-1][:4]
+    ytd_df = df_summary[df_summary['month'].str.startswith(latest_year)]
+    if not ytd_df.empty:
+        ytd = (1 + ytd_df['monthly_return']).prod() - 1
+        print(f"{latest_year} YTD 今年收益 : {ytd:.4%} (截至 {ytd_df['month'].iloc[-1]})")
     else:
-        print("2026 YTD 今年收益 : 无数据")
+        print(f"{latest_year} YTD 今年收益 : 无数据")
 
     # 将幸存者偏差诊断统计附加到 df_summary 元数据，供 HTML 报告使用
     df_summary.attrs["survivorship_diagnostic"] = {

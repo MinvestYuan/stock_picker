@@ -31,9 +31,6 @@ from data.ticker_resolver import TickerResolver
 from datetime import datetime
 
 
-RUSSELL_BACKTEST_HTML = Path("russell1000_backtest.html")
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="stock_picker",
@@ -46,8 +43,8 @@ def parse_args() -> argparse.Namespace:
         "command",
         nargs="?",
         default="dashboard",
-        choices=["dashboard", "resolve", "resolve-tickers"],
-        help="主要命令（默认 dashboard）：dashboard=回测+前向信号, resolve=ticker解析",
+        choices=["dashboard", "backtest", "resolve", "resolve-tickers"],
+        help="主要命令（默认 dashboard）：dashboard/backtest=回测+前向信号, resolve=ticker解析",
     )
     parser.add_argument("--history-file", type=Path, default=DEFAULT_HISTORY_FILE)
     parser.add_argument("--universe-source", choices=["nport", "file", "history"], default="nport")
@@ -1441,13 +1438,13 @@ def _calculate_metrics(returns: pd.Series) -> dict:
 def main() -> int:
     args = parse_args()
 
-    if args.command == "dashboard":
+    if args.command in ("dashboard", "backtest"):
         return cmd_dashboard(args)
 
     if args.command in ("resolve", "resolve-tickers"):
         return cmd_resolve_tickers(args)
 
-    print(f"[error] 未知命令: {args.command}。当前仅支持: dashboard, resolve", file=sys.stderr)
+    print(f"[error] 未知命令: {args.command}。当前仅支持: dashboard, backtest, resolve", file=sys.stderr)
     return 1
 
 
