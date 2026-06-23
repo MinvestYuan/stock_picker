@@ -11,6 +11,9 @@ from config import (
     BEAR_OVERLAY_TICKER,
     BEAR_SLOW_EMA_SPAN as SLOW_EMA_SPAN,
 )
+from utils.logconf import get_logger
+
+logger = get_logger(__name__)
 
 # 缓存：按 overlay 价格对象的 id + 长度 缓存 (fast_ema, slow_ema)，
 # 避免回测中每个月都对整条序列重算 EMA50/200。键用稳定的 price_map[ticker]
@@ -50,5 +53,11 @@ def is_qqq_bear_market(
         fast = float(ema_fast.loc[:asof_date].iloc[-1])
         slow = float(ema_slow.loc[:asof_date].iloc[-1])
         return fast < slow
-    except Exception:
-        return False
+    except Exception as e:
+        # 异常时保守持现金（返回 True），而非满仓（False）。
+        # 静默关闭熊市保护是最危险的方向：本该避险时却满仓。
+        logger.warning(
+            "熊市保护判定失败（%s, asof=%s）：%s，保守按持现金处理",
+            overlay_ticker, asof_date, e,
+        )
+        return True

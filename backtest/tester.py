@@ -58,6 +58,9 @@ def open_at(pseries: pd.DataFrame, dt: pd.Timestamp) -> float:
         row = row.iloc[0]
     if "open" in s.columns and pd.notna(row.get("open")):
         return float(row["open"])
+    # 无开盘价：回退到收盘价。买卖口径不一致会引入轻微误差，
+    # 用 debug 记录发生频率（正常运行不刷屏，诊断时开 debug 可见）。
+    logger.debug("%s 缺开盘价，回退用收盘价", dt.date())
     return float(row["close"])
 
 
