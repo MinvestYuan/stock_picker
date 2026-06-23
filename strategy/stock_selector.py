@@ -4,6 +4,8 @@ from typing import Dict, List, Sequence
 import pandas as pd
 import numpy as np
 
+from config import MOMENTUM_WEIGHT, RRG_WEIGHT
+
 
 @dataclass
 class PickRow:
@@ -67,10 +69,10 @@ def score_universe(
     momentum_ratios = [item['momentum_ratio'] for item in valid_data]
     rrg_combined = [item['rrg_combined'] for item in valid_data]
 
-    # 固定比例：4-1 momentum 占 60%，RRG (rs_ratio + rs_momentum) 占 40%
+    # 固定比例：4-1 momentum 与 RRG (rs_ratio + rs_momentum) 按 config 权重加权
     mom_norm = min_max_normalize(momentum_ratios)
     rrg_norm = min_max_normalize(rrg_combined)
-    total_scores = 0.6 * mom_norm + 0.4 * rrg_norm
+    total_scores = MOMENTUM_WEIGHT * mom_norm + RRG_WEIGHT * rrg_norm
 
     picks: List[PickRow] = []
     for i, item in enumerate(valid_data):

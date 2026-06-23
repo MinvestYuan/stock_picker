@@ -15,11 +15,12 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from main import cmd_dashboard, parse_args  # noqa: E402
+from utils.logconf import setup_logging  # noqa: E402
 
 
 def main() -> int:
+    setup_logging()
     args = parse_args()
-    args.command = "dashboard"
     args.output = ROOT / "index.html"
     return cmd_dashboard(args)
 

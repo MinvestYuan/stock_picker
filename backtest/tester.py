@@ -3,10 +3,13 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
-import sys
 
-from data.data_fetcher import DEFAULT_BENCHMARK
+from config import COST_PER_TRADE, DEFAULT_BENCHMARK, DEFAULT_TOP_N
+from strategy.risk_overlay import is_qqq_bear_market
 from strategy.stock_selector import score_universe
+from utils.logconf import get_logger
+
+logger = get_logger(__name__)
 
 
 def resolve_month_trade_dates(dates: pd.DatetimeIndex, month_str: str) -> tuple[pd.Timestamp, pd.Timestamp] | None:
@@ -22,10 +25,26 @@ def resolve_month_trade_dates(dates: pd.DatetimeIndex, month_str: str) -> tuple[
     return month_dates[0], future_dates[0]
 
 
+# 缓存规整后的 OHLC（按对象 id + 长度），避免 open_at 每次调用都
+# copy + to_datetime + sort_index。对于已规整且升序的索引（缓存加载的
+# 价格即如此），直接复用原对象，不额外占内存。
+_NORM_CACHE: dict[tuple[int, int], pd.DataFrame] = {}
+
+
 def _normalize_ohlc(pseries: pd.DataFrame) -> pd.DataFrame:
-    out = pseries.copy()
-    out.index = pd.to_datetime(out.index).normalize()
-    return out.sort_index()
+    cache_key = (id(pseries), len(pseries))
+    cached = _NORM_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    idx = pseries.index
+    if isinstance(idx, pd.DatetimeIndex) and idx.is_monotonic_increasing and idx.equals(idx.normalize()):
+        out = pseries
+    else:
+        out = pseries.copy()
+        out.index = pd.to_datetime(out.index).normalize()
+        out = out.sort_index()
+    _NORM_CACHE[cache_key] = out
+    return out
 
 
 def open_at(pseries: pd.DataFrame, dt: pd.Timestamp) -> float:
@@ -47,9 +66,9 @@ def backtest_nport_monthly(
     features: Dict[str, pd.DataFrame],
     monthly_universes: Dict[str, List[str]],
     benchmark_ticker: str = DEFAULT_BENCHMARK,
-    top_n: int = 5,
+    top_n: int = DEFAULT_TOP_N,
     momentum_col: str = "momentum",
-    cost_per_trade: float = 0.001,
+    cost_per_trade: float = COST_PER_TRADE,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     NPORT 持仓月度回测：每个月的 universe 来自 NPORT 持仓
@@ -94,23 +113,7 @@ def backtest_nport_monthly(
         if not filtered_features:
             continue
 
-        # Risk overlay: QQQ 50/200 MA 熊市保护（按用户要求）
-        # 当 QQQ 50MA < 200MA 时，全仓现金；反之重启策略
-        # 注意：price_map 现为 OHLC DataFrame（为支持浏览器 K 线 MTD），需提取 close 序列
-        qqq_bear = False
-        if "QQQ" in price_map:
-            qqq_raw = price_map["QQQ"]
-            qqq_close = qqq_raw["close"] if isinstance(qqq_raw, pd.DataFrame) and "close" in qqq_raw.columns else qqq_raw
-            qqq_ema50 = qqq_close.ewm(span=50, adjust=False).mean()
-            qqq_ema200 = qqq_close.ewm(span=200, adjust=False).mean()
-            try:
-                q50 = float(qqq_ema50.loc[:asof_date].iloc[-1])
-                q200 = float(qqq_ema200.loc[:asof_date].iloc[-1])
-                qqq_bear = q50 < q200
-            except Exception:
-                qqq_bear = False
-
-        if qqq_bear:
+        if is_qqq_bear_market(price_map, asof_date):
             # 熊市，持现金
             summary_rows.append({
                 "month": month_str,
@@ -199,10 +202,9 @@ def backtest_nport_monthly(
 
         total_pick_slots += len(rets)
         if month_missing > 0:
-            print(
-                f"[warn] {month_str}: top{top_n} 中有 {month_missing} 只无可交易价格，"
-                f"按现金(0)计入（避免向下替补造成幸存者偏差）",
-                file=sys.stderr,
+            logger.warning(
+                "%s: top%d 中有 %d 只无可交易价格，按现金(0)计入（避免向下替补造成幸存者偏差）",
+                month_str, top_n, month_missing,
             )
 
         monthly_ret = float(np.mean(rets))
@@ -217,7 +219,7 @@ def backtest_nport_monthly(
         })
 
     if not summary_rows:
-        print("[warn] 没有找到可回测的月份")
+        logger.warning("没有找到可回测的月份")
         return pd.DataFrame(), pd.DataFrame()
 
     df_summary = pd.DataFrame(summary_rows).sort_values("month").reset_index(drop=True)
@@ -228,37 +230,31 @@ def backtest_nport_monthly(
     worst_monthly_return = df_summary["monthly_return"].min()
 
     months = len(df_summary)
-    print(f"\n=== NPORT 持仓月度回测完成（{df_summary['month'].iloc[0]} ~ {df_summary['month'].iloc[-1]}）===")
-    print(f"测试月份数量 : {months}")
-    print(f"平均月度回报 : {df_summary['monthly_return'].mean():.4%}")
-    print(f"累计回报     : {df_summary['cumulative_return'].iloc[-1]:.2%}")
+    logger.info("=== NPORT 持仓月度回测完成（%s ~ %s）===", df_summary['month'].iloc[0], df_summary['month'].iloc[-1])
+    logger.info("测试月份数量 : %d", months)
+    logger.info("平均月度回报 : %.4f%%", df_summary['monthly_return'].mean() * 100)
+    logger.info("累计回报     : %.2f%%", df_summary['cumulative_return'].iloc[-1] * 100)
     if months > 1:
         ann_ret = (1 + df_summary['cumulative_return'].iloc[-1]) ** (12 / months) - 1
-        print(f"年化回报（近似）: {ann_ret:.4%}")
-    print(f"胜率         : {(df_summary['monthly_return'] > 0).mean():.1%}")
-    print(f"最差月度回报 : {worst_monthly_return:.2%}")
+        logger.info("年化回报（近似）: %.4f%%", ann_ret * 100)
+    logger.info("胜率         : %.1f%%", (df_summary['monthly_return'] > 0).mean() * 100)
+    logger.info("最差月度回报 : %.2f%%", worst_monthly_return * 100)
 
     # 幸存者偏差诊断：无价仓位占比越高，回测收益越不可信
     if total_pick_slots > 0:
         miss_pct = total_missing_slots / total_pick_slots
-        print(
-            f"无价仓位(按现金计) : {total_missing_slots}/{total_pick_slots} ({miss_pct:.2%})"
-        )
+        logger.info("无价仓位(按现金计) : %d/%d (%.2f%%)", total_missing_slots, total_pick_slots, miss_pct * 100)
         if miss_pct > 0.02:
-            print(
-                "[warn] 无价仓位占比偏高：退市/停牌股缺失会影响回测可信度，"
-                "建议补充含退市历史的价格源",
-                file=sys.stderr,
-            )
+            logger.warning("无价仓位占比偏高：退市/停牌股缺失会影响回测可信度，建议补充含退市历史的价格源")
 
     # 计算最新年份的 YTD 收益（动态取数据中最新月份的年份，避免写死年份）
     latest_year = df_summary['month'].iloc[-1][:4]
     ytd_df = df_summary[df_summary['month'].str.startswith(latest_year)]
     if not ytd_df.empty:
         ytd = (1 + ytd_df['monthly_return']).prod() - 1
-        print(f"{latest_year} YTD 今年收益 : {ytd:.4%} (截至 {ytd_df['month'].iloc[-1]})")
+        logger.info("%s YTD 今年收益 : %.4f%% (截至 %s)", latest_year, ytd * 100, ytd_df['month'].iloc[-1])
     else:
-        print(f"{latest_year} YTD 今年收益 : 无数据")
+        logger.info("%s YTD 今年收益 : 无数据", latest_year)
 
     # 将幸存者偏差诊断统计附加到 df_summary 元数据，供 HTML 报告使用
     df_summary.attrs["survivorship_diagnostic"] = {

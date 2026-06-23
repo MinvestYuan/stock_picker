@@ -1,61 +1,46 @@
 from __future__ import annotations
-import sys
 import time
-import pickle
-import gzip
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Sequence, Optional, Tuple
+from typing import Dict, Sequence, Tuple
 import asyncio
-import json
 
-import numpy as np
 import pandas as pd
-from ib_insync import IB, Stock, util
+from ib_async import IB, Stock, util
+
+from config import (
+    DEFAULT_BENCHMARK,
+    DEFAULT_DURATION,
+    FEATURE_EMA_SPAN,
+    IB_CLIENT_ID,
+    IB_HOST,
+    IB_PORT,
+    MOMENTUM_LONG_LOOKBACK,
+    MOMENTUM_SHORT_LOOKBACK,
+    PRICE_CLIENT_ID_OFFSET,
+    RS_MOMENTUM_WINDOW,
+    RS_RATIO_WINDOW,
+)
+from utils.logconf import get_logger
+from utils.progress import ProgressBar
+from .storage import (
+    load_price_map,
+    price_cache_exists,
+    price_cache_mtime,
+    price_parquet_path,
+    save_price_map,
+)
+
+logger = get_logger(__name__)
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_HISTORY_FILE = ROOT_DIR / "converted_data.xlsx"
-DEFAULT_BENCHMARK = "SPY"
-DEFAULT_DURATION = "11 Y"
-DEFAULT_MIN_MARKET_CAP = 10_000_000_000
 
 
-# ==================== 持久化 + 增量更新价格缓存（Parquet 优化版） ====================
+# ==================== 持久化 + 增量更新价格缓存（Parquet） ====================
 def get_cache_filename(benchmark: str, duration: str = DEFAULT_DURATION) -> Path:
-    """
-    返回价格缓存文件路径。
-    
-    优化说明（2026）：
-    - 主格式已从 pickle.gz 升级为 Parquet（更稳健、可演进、压缩率更高、跨工具兼容）。
-    - 缓存文件名不再依赖 duration，避免碎片文件。
-    - 统一规范名：cache/price_cache_{benchmark}.parquet
-    
-    自动迁移：
-    - 检测到旧的 .pkl.gz（含带 duration 的旧版）会自动加载并在下次保存时转为 .parquet。
-    - duration 参数仅用于首次缺失数据时向 IB 请求的时长，不影响文件名。
-    """
-    cache_dir = ROOT_DIR / "cache"
-    cache_dir.mkdir(exist_ok=True)
-    
-    # 新规范文件名（Parquet）
-    canonical = cache_dir / f"price_cache_{benchmark}.parquet"
-    
-    # 兼容旧的 pickle 缓存（自动迁移逻辑）
-    legacy_pkl = cache_dir / f"price_cache_{benchmark}.pkl.gz"
-    duration_clean = duration.replace(" ", "")
-    legacy_with_duration = cache_dir / f"price_cache_{benchmark}_{duration_clean}.pkl.gz"
-    old_root_legacy = ROOT_DIR / f"price_cache_{benchmark}_{duration_clean}.pkl.gz"
-    root_old_pkl = ROOT_DIR / f"price_cache_{benchmark}.pkl.gz"
-    
-    # 如果新 parquet 不存在，但任意旧 pkl 存在，记录待迁移（实际迁移在 load 时完成）
-    # 这里只做最基本的旧文件提示/清理
-    for old_path in [legacy_with_duration, old_root_legacy, root_old_pkl, legacy_pkl]:
-        if old_path.exists() and not canonical.exists():
-            print(f"[info] 检测到旧价格缓存 {old_path.name}，下次保存时将自动迁移为 Parquet 格式", file=sys.stderr)
-            break
-            
-    return canonical
+    """返回指定 benchmark 的 Parquet 价格缓存路径。"""
+    return price_parquet_path(benchmark)
 
 
 def _get_cache_stats(price_map: Dict[str, pd.DataFrame]) -> dict:
@@ -71,95 +56,39 @@ def _get_cache_stats(price_map: Dict[str, pd.DataFrame]) -> dict:
     }
 
 
-def _format_cache_info(stats: dict, cache_file: Path) -> str:
+def _format_cache_info(stats: dict, benchmark: str) -> str:
     """格式化缓存信息用于输出"""
     parts = [f"{stats['count']} 只股票"]
     if stats.get("min_date") and stats.get("max_date"):
         min_d = pd.to_datetime(stats["min_date"]).strftime("%Y-%m-%d")
         max_d = pd.to_datetime(stats["max_date"]).strftime("%Y-%m-%d")
         parts.append(f"数据范围 {min_d} ~ {max_d}")
-    # 文件修改时间
-    if cache_file.exists():
-        mtime = datetime.fromtimestamp(cache_file.stat().st_mtime)
-        age_days = (datetime.now() - mtime).days
-        parts.append(f"文件 {age_days} 天前更新")
+    if price_cache_exists(benchmark):
+        mtime = price_cache_mtime(benchmark)
+        if mtime is not None:
+            age_days = (datetime.now() - mtime).days
+            parts.append(f"缓存 {age_days} 天前更新")
     return ", ".join(parts)
 
 
-def _load_legacy_pickle_cache(pkl_path: Path) -> Dict[str, pd.Series] | None:
-    """加载旧版 pickle.gz 格式（用于自动迁移）。"""
-    if not pkl_path.exists():
+def load_price_cache(cache_file: Path, benchmark: str = DEFAULT_BENCHMARK) -> Dict[str, pd.DataFrame] | None:
+    """从 Parquet 加载指定 benchmark 的价格缓存。"""
+    benchmark = benchmark.upper()
+    if not price_cache_exists(benchmark):
         return None
     try:
-        with gzip.open(pkl_path, "rb") as f:
-            data = pickle.load(f)
-        print(f"[info] 从旧版 pickle 缓存加载成功: {pkl_path.name}（准备迁移到 Parquet）", file=sys.stderr)
-        return data
+        price_map = load_price_map(benchmark)
+        stats = _get_cache_stats(price_map)
+        info = _format_cache_info(stats, benchmark)
+        logger.info("已从 Parquet 缓存加载价格数据: %s (%s)", benchmark, info)
+        return price_map
     except Exception as e:
-        print(f"[warn] 旧版 pickle 缓存加载失败: {e}", file=sys.stderr)
+        logger.warning("加载 Parquet 价格缓存失败: %s", e)
         return None
-
-
-def load_price_cache(cache_file: Path) -> Dict[str, pd.Series] | None:
-    """
-    加载价格缓存。
-    优先级：
-      1. 新版 .parquet（推荐）
-      2. 自动检测并加载同目录下的旧版 .pkl.gz（返回数据，后续保存会迁移）
-    """
-    if not cache_file.exists():
-        # 尝试自动发现旧版 pickle（同基准名）
-        if cache_file.suffix == ".parquet":
-            legacy = cache_file.with_suffix(".pkl.gz")
-            if legacy.exists():
-                return _load_legacy_pickle_cache(legacy)
-            # 也尝试不带 .gz 的极旧版
-            legacy2 = cache_file.parent / (cache_file.stem + ".pkl.gz")
-            if legacy2.exists() and legacy2 != legacy:
-                return _load_legacy_pickle_cache(legacy2)
-        return None
-
-    # 新版 Parquet
-    if str(cache_file).endswith(".parquet"):
-        try:
-            df = pd.read_parquet(cache_file)
-            if df is None or df.empty:
-                return {}
-            # 兼容不同列名
-            cols = {c.lower(): c for c in df.columns}
-            ticker_col = cols.get("ticker", "ticker")
-            date_col = cols.get("date", cols.get("index", "date"))
-
-            price_map: Dict[str, pd.DataFrame] = {}
-            for ticker, g in df.groupby(ticker_col):
-                g = g.set_index(pd.to_datetime(g[date_col])).sort_index()
-                if "open" in g.columns and "high" in g.columns:
-                    ohlc = g[["open", "high", "low", "close"]].apply(pd.to_numeric, errors="coerce").dropna()
-                else:
-                    # old cache only had close
-                    close = pd.to_numeric(g[cols.get("close", "close")], errors="coerce")
-                    ohlc = pd.DataFrame({
-                        "open": close,
-                        "high": close,
-                        "low": close,
-                        "close": close
-                    }, index=g.index).dropna()
-                if not ohlc.empty:
-                    price_map[str(ticker)] = ohlc
-            stats = _get_cache_stats(price_map)
-            info = _format_cache_info(stats, cache_file)
-            print(f"[info] 已从 Parquet 缓存加载价格数据: {cache_file.name} ({info})", file=sys.stderr)
-            return price_map
-        except Exception as e:
-            print(f"[warn] 加载 Parquet 缓存失败: {e}", file=sys.stderr)
-            return None
-
-    # 兜底：直接是旧 pkl.gz 路径被调用
-    return _load_legacy_pickle_cache(cache_file)
 
 
 def get_cache_age_days(cache_file: Path) -> int | None:
-    """返回缓存文件修改时间距今的天数，文件不存在返回 None"""
+    """返回 Parquet 缓存文件修改时间距今的天数，文件不存在返回 None"""
     if not cache_file.exists():
         return None
     mtime = datetime.fromtimestamp(cache_file.stat().st_mtime)
@@ -179,72 +108,14 @@ def get_cache_data_max_age_days(price_map: Dict[str, pd.Series]) -> int | None:
     return int((now - max_date).days)
 
 
-def save_price_cache(price_map: Dict[str, pd.Series], cache_file: Path):
-    """
-    保存价格缓存。
-    - 目标为 .parquet 时使用 Parquet（zstd 压缩 + pyarrow）。
-    - 检测到传入旧的 .pkl.gz 路径时仍兼容写入（但新调用已统一为 .parquet）。
-    - 保存成功后会尝试清理同目录下的旧版 pkl.gz（迁移完成）。
-    """
+def save_price_cache(price_map: Dict[str, pd.Series], cache_file: Path, benchmark: str = DEFAULT_BENCHMARK):
+    """保存价格缓存到 Parquet。"""
     if not price_map:
         return
     try:
-        target_is_parquet = str(cache_file).endswith(".parquet")
-
-        if target_is_parquet:
-            # 转为长表格式（极适合 Parquet 列式存储 + 未来扩展 OHLCV）
-            rows = []
-            for t, df in price_map.items():
-                if df is None or df.empty:
-                    continue
-                tmp = df.reset_index()
-                tmp["ticker"] = t
-                rows.append(tmp[["ticker", "date", "open", "high", "low", "close"]])
-
-            if not rows:
-                return
-            full = pd.concat(rows, ignore_index=True)
-            full["date"] = pd.to_datetime(full["date"]).dt.tz_localize(None)  # 确保 naive timestamp
-            # 让 pandas 自动选择可用引擎（优先 pyarrow，其次 fastparquet）
-            # zstd 压缩率好、速度快；如报错请 pip install pyarrow
-            try:
-                full.to_parquet(cache_file, compression="zstd", index=False)
-            except ImportError as ie:
-                raise ImportError(
-                    "Parquet 引擎缺失。请安装推荐依赖：\n"
-                    "  pip install pyarrow\n"
-                    "或：pip install fastparquet"
-                ) from ie
-
-            print(f"[info] 价格数据已持久化保存 → {cache_file.name} ({len(price_map)} 只股票, Parquet)", file=sys.stderr)
-
-            # 迁移成功后清理旧版 pickle（同目录）
-            _cleanup_legacy_price_caches(cache_file)
-
-        else:
-            # 旧格式兜底（极少触发）
-            with gzip.open(cache_file, "wb") as f:
-                pickle.dump(price_map, f)
-            print(f"[info] 价格数据已持久化保存 → {cache_file.name} ({len(price_map)} 只股票) [legacy pickle]", file=sys.stderr)
-
+        save_price_map(benchmark.upper(), price_map)
     except Exception as e:
-        print(f"[warn] 保存缓存失败: {e}", file=sys.stderr)
-
-
-def _cleanup_legacy_price_caches(parquet_path: Path):
-    """迁移完成后静默清理同基准的旧 pkl 缓存文件。"""
-    try:
-        stem = parquet_path.stem  # price_cache_SPY
-        for f in parquet_path.parent.glob("price_cache_*.pkl.gz"):
-            try:
-                # 只要文件名包含这个基准（SPY / QQQ 等），就视为同系列旧缓存
-                if stem in f.name or f.name.startswith(stem):
-                    f.unlink(missing_ok=True)
-                    print(f"[info] 已清理旧版缓存: {f.name}", file=sys.stderr)
-            except Exception:
-                pass
-    except Exception:
-        pass
+        logger.warning("保存缓存失败: %s", e)
 
 
 def _calculate_incremental_duration(last_date: pd.Timestamp, target_end: pd.Timestamp | None = None) -> str:
@@ -314,7 +185,7 @@ def _fetch_bars(ib: IB, ticker: str, end_date_str: str, duration_str: str) -> li
     contract = Stock(ticker, "SMART", "USD")
     qualified = ib.qualifyContracts(contract)
     if not qualified:
-        print(f"[warn] could not qualify {ticker}", file=sys.stderr)
+        logger.warning("could not qualify %s", ticker)
         return None
     bars = ib.reqHistoricalData(
         qualified[0],
@@ -326,32 +197,6 @@ def _fetch_bars(ib: IB, ticker: str, end_date_str: str, duration_str: str) -> li
         formatDate=1,
     )
     return bars
-
-
-def _is_synthetic_ohlc(df: pd.DataFrame | pd.Series | None) -> bool:
-    """旧版缓存仅保存收盘价时，open/high/low 会被填成与 close 相同。"""
-    if df is None or (hasattr(df, "empty") and df.empty):
-        return False
-    if not isinstance(df, pd.DataFrame):
-        return True
-    if not {"open", "close"}.issubset(df.columns):
-        return True
-    o = pd.to_numeric(df["open"], errors="coerce")
-    c = pd.to_numeric(df["close"], errors="coerce")
-    valid = o.notna() & c.notna()
-    if not valid.any():
-        return True
-    return bool((o[valid] - c[valid]).abs().max() < 1e-9)
-
-
-def price_map_needs_ohlc_refresh(price_map: Dict[str, pd.DataFrame]) -> bool:
-    """判断价格缓存是否仍为“收盘价冒充 OHLC”的旧格式。"""
-    if not price_map:
-        return False
-    probe = price_map.get(DEFAULT_BENCHMARK)
-    if probe is None and price_map:
-        probe = next(iter(price_map.values()))
-    return _is_synthetic_ohlc(probe)
 
 
 def _bars_to_series(bars: list, ticker: str) -> pd.DataFrame | None:
@@ -385,10 +230,6 @@ def _get_fetch_info(
     """
     last_date = None
     if existing is not None and not existing.empty:
-        if _is_synthetic_ohlc(existing):
-            # 旧缓存无真实开盘价，需全量重拉 OHLC 后替换
-            return default_duration, False, None
-
         last_date = existing.index.max()
         if hasattr(last_date, "tz") and last_date.tz is not None:
             last_date = last_date.tz_localize(None)
@@ -413,9 +254,10 @@ def _fetch_on_connection(
     end_date_str: str,
     pause_seconds: float,
     existing_price_map: Dict[str, pd.Series],
+    progress: ProgressBar | None = None,
 ) -> Dict[str, pd.Series]:
     """在一个独立的 IB 连接（clientId）上顺序处理一批 ticker，返回该批的更新结果。"""
-    # ib_insync uses asyncio internally; ensure an event loop exists in this worker thread
+    # ib_async uses asyncio internally; ensure an event loop exists in this worker thread
     try:
         asyncio.get_running_loop()
     except RuntimeError:
@@ -424,14 +266,17 @@ def _fetch_on_connection(
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-    ib = connect_ib(host, port, client_id)
+    ib = None
     local_results: Dict[str, pd.Series] = {}
     try:
-        for idx, (ticker, duration_str, is_incremental, last_date) in enumerate(tickers_info, 1):
-            print(
-                f"[info] [c{client_id}] {'增量更新' if is_incremental else '完整下载'} {ticker} → {duration_str}",
-                file=sys.stderr,
-            )
+        ib = connect_ib(host, port, client_id)
+    except Exception as e:
+        logger.warning("[c%s] IB 连接失败: %s", client_id, e)
+        if progress is not None:
+            progress.update(len(tickers_info))
+        return local_results
+    try:
+        for _idx, (ticker, duration_str, is_incremental, last_date) in enumerate(tickers_info, 1):
             bars = _fetch_bars(ib, ticker, end_date_str, duration_str)
             new_series = _bars_to_series(bars, ticker)
 
@@ -448,8 +293,11 @@ def _fetch_on_connection(
 
             if pause_seconds > 0:
                 time.sleep(pause_seconds)
+            if progress is not None:
+                progress.update(1)
     finally:
-        ib.disconnect()
+        if ib is not None:
+            ib.disconnect()
     return local_results
 
 
@@ -468,7 +316,8 @@ def fetch_or_update_history(
     """核心增量更新函数（首次全量，后续仅更新缺失部分）。
 
     默认使用 4 个并行 IB 连接同时请求数据（显著加速 1000+ 只股票的价格更新，比单连接快很多）。
-    - num_connections=4（默认）：推荐值，创建 4 个独立 clientId 的连接并行拉取。
+    - num_connections=4（默认）：推荐值，创建 4 个独立 clientId 的连接并行拉取
+      （clientId = client_id + 10 + i，与 TickerResolver 的 client_id+1..N 错开）。
     - 可通过 --num-connections 1 退回单连接保守模式。
     每个连接内部仍顺序 + pause_seconds 以遵守 IB pacing 限制。
 
@@ -489,164 +338,98 @@ def fetch_or_update_history(
         target_end = target_end.tz_localize(None)
 
     # 预先筛选需要从 IB 请求的 ticker（跳过已新鲜的）
+    latest_trading_day = _get_latest_trading_day(target_end)
+
     to_process: list = []
-    for ticker in tickers:
-        existing = results.get(ticker)
-        info = _get_fetch_info(ticker, existing, target_end, duration)
-        if info is None:
-            continue
-        duration_str, is_incremental, last_date = info
-        to_process.append((ticker, duration_str, is_incremental, last_date))
+    skipped = 0
+    with ProgressBar(len(tickers), "检查价格缓存", unit="股") as bar:
+        for ticker in tickers:
+            existing = results.get(ticker)
+            info = _get_fetch_info(ticker, existing, target_end, duration)
+            if info is None:
+                skipped += 1
+            else:
+                duration_str, is_incremental, last_date = info
+                to_process.append((ticker, duration_str, is_incremental, last_date))
+            bar.update(1, 跳过=skipped, 待拉=len(to_process))
 
-    if not to_process:
-        print(f"[info] 所有目标股票数据均已最新，无需从 IB 更新", file=sys.stderr)
-        print(f"[info] 价格数据更新完成，共 {len(results)} 只股票", file=sys.stderr)
-        return results
-
-    print(
-        f"[info] 需要从 IB 获取/更新数据：{len(to_process)} / {len(tickers)} 只股票 "
-        f"（num_connections={num_connections}）",
-        file=sys.stderr,
+    logger.info(
+        "缓存检查完成（最近交易日 %s）：跳过 %d 只，需从 IB 拉取 %d 只",
+        latest_trading_day.date(), skipped, len(to_process),
     )
 
+    if not to_process:
+        logger.info("价格数据已是最新，共 %d 只股票", len(results))
+        return results
+
     if num_connections <= 1:
-        # 单连接路径（完全兼容原有 ib 传入方式）
         own_connection = ib is None
         if own_connection:
+            logger.info("连接 IB Gateway (%s:%s, clientId=%s)...", host, port, client_id)
             ib = connect_ib(host, port, client_id)
         try:
-            for idx, (ticker, duration_str, is_incremental, last_date) in enumerate(to_process, start=1):
-                print(
-                    f"[info] {'增量更新' if is_incremental else '完整下载'} {ticker} → {duration_str}",
-                    file=sys.stderr,
-                )
-                bars = _fetch_bars(ib, ticker, end_date_str, duration_str)
-                new_series = _bars_to_series(bars, ticker)
+            with ProgressBar(len(to_process), "IB 拉取价格", unit="股") as bar:
+                for _idx, (ticker, duration_str, is_incremental, last_date) in enumerate(to_process, start=1):
+                    bars = _fetch_bars(ib, ticker, end_date_str, duration_str)
+                    new_series = _bars_to_series(bars, ticker)
 
-                if new_series is not None and not new_series.empty:
-                    existing = results.get(ticker)
-                    if existing is None or existing.empty or not is_incremental:
-                        results[ticker] = new_series
-                    else:
-                        new_series = new_series[new_series.index > last_date]
-                        if not new_series.empty:
-                            combined = pd.concat([existing, new_series])
-                            combined = combined[~combined.index.duplicated(keep="last")].sort_index()
-                            results[ticker] = combined
+                    if new_series is not None and not new_series.empty:
+                        existing = results.get(ticker)
+                        if existing is None or existing.empty or not is_incremental:
+                            results[ticker] = new_series
+                        else:
+                            new_series = new_series[new_series.index > last_date]
+                            if not new_series.empty:
+                                combined = pd.concat([existing, new_series])
+                                combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+                                results[ticker] = combined
 
-                if pause_seconds > 0:
-                    time.sleep(pause_seconds)
-
-                if idx % 25 == 0 or idx == len(to_process):
-                    print(f"[info] 已处理 {idx}/{len(to_process)} 只股票", file=sys.stderr)
+                    if pause_seconds > 0:
+                        time.sleep(pause_seconds)
+                    bar.update(1)
         finally:
             if own_connection and ib is not None:
                 ib.disconnect()
     else:
-        # 多连接并行路径
         n = max(1, num_connections)
         chunks: list[list] = [to_process[i::n] for i in range(n)]
         chunks = [c for c in chunks if c]
-        print(f"[info] 已拆分到 {len(chunks)} 个并行连接", file=sys.stderr)
+        logger.info("并行拉取：%d 只股票，%d 个 IB 连接", len(to_process), len(chunks))
 
-        with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
-            futures = []
-            for i, chunk in enumerate(chunks):
-                c_id = client_id + i
-                fut = executor.submit(
-                    _fetch_on_connection,
-                    host,
-                    port,
-                    c_id,
-                    chunk,
-                    end_date_str,
-                    pause_seconds,
-                    results,  # 传递初始快照供读取 existing 数据用于合并
-                )
-                futures.append(fut)
+        with ProgressBar(len(to_process), "IB 拉取价格", unit="股") as bar:
+            with ThreadPoolExecutor(max_workers=len(chunks)) as executor:
+                futures = []
+                for i, chunk in enumerate(chunks):
+                    c_id = client_id + PRICE_CLIENT_ID_OFFSET + i
+                    fut = executor.submit(
+                        _fetch_on_connection,
+                        host,
+                        port,
+                        c_id,
+                        chunk,
+                        end_date_str,
+                        pause_seconds,
+                        results,
+                        bar,
+                    )
+                    futures.append((c_id, fut))
 
-            for fut in as_completed(futures):
-                partial = fut.result()
-                results.update(partial)
+                failed = 0
+                for c_id, fut in futures:
+                    try:
+                        partial = fut.result()
+                        results.update(partial)
+                    except Exception as e:
+                        failed += 1
+                        logger.warning("[c%s] 并行价格更新失败: %s", c_id, e)
+                if failed:
+                    logger.warning("%d/%d 个并行连接失败", failed, len(futures))
 
-        # 统一进度提示
-        print(f"[info] 已处理 {len(to_process)}/{len(to_process)} 只股票", file=sys.stderr)
-
-    print(f"[info] 价格数据更新完成，共 {len(results)} 只股票", file=sys.stderr)
-
-
+    logger.info("价格数据更新完成，共 %d 只股票", len(results))
     return results
 
 
-# ==================== 以下为原有函数（完全保持不变） ====================
-def normalize_ticker(value: object) -> str | None:
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return None
-    ticker = str(value).strip().upper()
-    return ticker or None
-
-
-def load_history_rows(history_file: Path) -> pd.DataFrame:
-    raw = pd.read_excel(history_file)
-    rows: List[dict] = []
-    for _, row in raw.iterrows():
-        month = str(row["month"])
-        for i in range(5):
-            prefix = f"picks[{i}]"
-            ticker = normalize_ticker(row.get(f"{prefix}.ticker"))
-            if not ticker:
-                continue
-            rows.append({
-                "month": month,
-                "ticker": ticker,
-                "entry_ts": pd.to_datetime(row[f"{prefix}.entry_ts"]),
-                "score": float(row[f"{prefix}.score"]),
-                "ema50_score": float(row[f"{prefix}.ema50_score"]),
-                "rrg_score": float(row[f"{prefix}.rrg_score"]),
-            })
-    return pd.DataFrame(rows).sort_values(["entry_ts", "ticker"]).reset_index(drop=True)
-
-
-def load_tickers_from_history(history_file: Path) -> List[str]:
-    history = load_history_rows(history_file)
-    return sorted(history["ticker"].dropna().unique().tolist())
-
-
-def load_tickers_from_file(path: Path) -> List[str]:
-    suffix = path.suffix.lower()
-    tickers: List[str] = []
-    if suffix in {".csv", ".xlsx", ".xls"}:
-        if suffix == ".csv":
-            df = pd.read_csv(path)
-        else:
-            df = pd.read_excel(path)
-        first_col = df.columns[0]
-        tickers = [t for t in (normalize_ticker(v) for v in df[first_col]) if t]
-    else:
-        tickers = [t for t in (normalize_ticker(line) for line in path.read_text().splitlines()) if t]
-    return sorted(set(tickers))
-
-
-def build_universe(
-    universe_source: str,
-    min_market_cap: float,
-    history_file: Path | None,
-    universe_file: Path | None,
-) -> List[str]:
-    if universe_source == "file":
-        if universe_file is None:
-            raise ValueError("--universe-file is required when --universe-source=file")
-        return load_tickers_from_file(universe_file)
-    if universe_source == "history":
-        if history_file is None or not history_file.exists():
-            raise FileNotFoundError("history file is required when --universe-source=history")
-        return load_tickers_from_history(history_file)
-    # 默认（以及显式指定 nport）均使用 Russell 1000 NPORT 持仓
-    from .nport_universe import get_latest_universe
-    return get_latest_universe()
-
-
-def connect_ib(host: str, port: int, client_id: int) -> IB:
+def connect_ib(host: str = IB_HOST, port: int = IB_PORT, client_id: int = IB_CLIENT_ID) -> IB:
     ib = IB()
     ib.connect(host, port, clientId=client_id, readonly=True)
     return ib
@@ -656,21 +439,21 @@ def prepare_feature_frame(ohlc: pd.DataFrame, benchmark: pd.Series) -> pd.DataFr
     common = ohlc[["close"]].join(benchmark.to_frame("benchmark"), how="inner")
     if common.empty:
         return common
-    common["ema50"] = common["close"].ewm(span=50, adjust=False).mean()
+    common["ema50"] = common["close"].ewm(span=FEATURE_EMA_SPAN, adjust=False).mean()
     common["rel"] = common["close"] / common["benchmark"]
 
     weekly = common[["rel"]].resample("W-MON").last().dropna()
-    weekly["rs_ratio"] = 100.0 + 25.0 * (weekly["rel"] / weekly["rel"].rolling(26).mean() - 1.0)
+    weekly["rs_ratio"] = 100.0 + 25.0 * (weekly["rel"] / weekly["rel"].rolling(RS_RATIO_WINDOW).mean() - 1.0)
     weekly["rs_momentum"] = 100.0 + 100.0 * (
-        weekly["rs_ratio"] / weekly["rs_ratio"].rolling(13).mean() - 1.0
+        weekly["rs_ratio"] / weekly["rs_ratio"].rolling(RS_MOMENTUM_WINDOW).mean() - 1.0
     )
 
     # ==================== 绝对动量（4-1 Momentum） ====================
     # 本项目统一使用 4-1 动量（过去4个月回报 − 过去1个月回报）
     common["momentum"] = (
-        common["close"] / common["close"].shift(84) - 1
+        common["close"] / common["close"].shift(MOMENTUM_LONG_LOOKBACK) - 1
     ) - (
-        common["close"] / common["close"].shift(21) - 1
+        common["close"] / common["close"].shift(MOMENTUM_SHORT_LOOKBACK) - 1
     )
     # ================================================================
 
@@ -686,20 +469,10 @@ def prepare_all_features(price_map: Dict[str, pd.Series], benchmark_ticker: str)
         raise ValueError(f"benchmark {benchmark_ticker} was not downloaded")
     benchmark_df = price_map[benchmark_ticker]
     benchmark = benchmark_df["close"] if isinstance(benchmark_df, pd.DataFrame) else benchmark_df
+    tickers = [t for t in price_map if t != benchmark_ticker]
     features: Dict[str, pd.DataFrame] = {}
-    for ticker, ohlc in price_map.items():
-        if ticker == benchmark_ticker:
-            continue
-        features[ticker] = prepare_feature_frame(ohlc, benchmark)
+    with ProgressBar(len(tickers), "计算特征", unit="股") as bar:
+        for ticker in tickers:
+            features[ticker] = prepare_feature_frame(price_map[ticker], benchmark)
+            bar.update(1)
     return features
-
-
-def resolve_asof_date(price_map: Dict[str, pd.Series], benchmark_ticker: str, asof: str | None) -> pd.Timestamp:
-    benchmark = price_map[benchmark_ticker]
-    if asof is None:
-        return pd.to_datetime(benchmark.index.max())
-    requested = pd.to_datetime(asof)
-    eligible = benchmark.loc[:requested]
-    if eligible.empty:
-        raise ValueError(f"no benchmark bars on or before {requested.date()}")
-    return pd.to_datetime(eligible.index.max())

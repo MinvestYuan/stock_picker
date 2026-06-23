@@ -1,17 +1,12 @@
 # Dependencies for Russell 1000 NPORT backtest report
 pandas>=2.0.0
 numpy>=1.24.0
-ib_insync>=0.9.86
+ib_async>=2.0.0
 requests>=2.31.0
 lxml>=4.9.0
-plotly>=5.18.0
-openpyxl>=3.1.0
-xlsxwriter>=3.1.0
+pyarrow>=14.0.0
+pandas_market_calendars>=4.0.0
 
-# Optional but recommended for better performance
-# python-dotenv>=1.0.0   # if you want to load proxy from .env in the future
-
-# 价格缓存已升级为 Parquet 格式（强烈推荐安装 pyarrow 获得最佳体验）
-# pip install pyarrow
-# （pandas 会自动使用 pyarrow 或 fastparquet 任一可用的引擎）
-
+# ib_async：ib_insync 的活跃维护继任者（API 兼容）
+# pandas_market_calendars：美股交易日历（下一个交易日计算）
+# 价格 OHLC → Parquet（cache/price_cache_*.parquet）；NPORT/ticker → SQLite

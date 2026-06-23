@@ -79,6 +79,7 @@ Thumbs.db
 # Price history caches (very large, regenerated via IB)
 price_cache_*.pkl.gz
 price_cache_*.pkl
+price_cache_*.parquet
 *.pkl.gz
 
 # Raw N-PORT XML downloads (large, can be re-fetched)
