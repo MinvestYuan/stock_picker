@@ -225,7 +225,7 @@ def sync_holdings_if_needed(
     lookback_months: int = 6,
     auto_resolve_tickers: bool = True,
     ib_host: str = "127.0.0.1",
-    ib_port: int = 4001,
+    ib_port: int = 4002,
     ib_client_id: int = 17,
     ib_num_connections: int = 4,
 ) -> Dict:

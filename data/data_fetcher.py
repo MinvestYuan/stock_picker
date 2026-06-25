@@ -309,7 +309,7 @@ def fetch_or_update_history(
     pause_seconds: float = 0.25,
     existing_price_map: Dict[str, pd.Series] | None = None,
     host: str = "127.0.0.1",
-    port: int = 4001,
+    port: int = 4002,
     client_id: int = 17,
     num_connections: int = 4,
 ) -> Dict[str, pd.Series]:
