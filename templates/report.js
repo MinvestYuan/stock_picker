@@ -1,4 +1,4 @@
-// Minvest 报告前端逻辑：从 #report-data 的 JSON payload 渲染所有动态内容并初始化图表。
+// 报告前端逻辑：从 #report-data 的 JSON payload 渲染所有动态内容并初始化图表。
 const DATA = JSON.parse(document.getElementById('report-data').textContent);
 
 const annualReturns = DATA.annual_returns;

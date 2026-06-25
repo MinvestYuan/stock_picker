@@ -1,4 +1,4 @@
-# Minvest
+# Stock Picker
 
 Russell 1000 NPORT 月度回测 + 静态 HTML 报告（TradingView 图表 + 交互持仓卡片）。
 
@@ -59,22 +59,4 @@ python report/test_metrics.py           # 指标计算（夏普/回撤等）
 python backtest/test_backtest.py        # 回测引擎端到端
 ```
 
-## 部署到 GitHub Pages
-
-GitHub 仅用于存放代码和部署静态报告。
-
-- 本仓库（stock_picker）是**私有项目**，包含完整源码。
-- 公开部署仓库是 **Minvest** (https://github.com/MinvestYuan/Minvest)，只包含 index.html，部署到 `https://minvestyuan.github.io/Minvest/`。
-
-一次性配置：
-
-```powershell
-git remote add minvest git@github.com:MinvestYuan/Minvest.git
-pwsh scripts/setup-minvest-hook.ps1   # 安装 post-commit hook
-```
-
-安装 hook 后，每次提交包含 `index.html` 的 commit 会自动只推送 index.html 到 Minvest 仓库。
-
-Minvest 仓库 Settings → Pages：Source 选 *Deploy from a branch*，Branch 选 **main**，Folder 选 **/ (root)**。
-
-报告使用 Tailwind CDN + lightweight-charts CDN，其余全部内嵌；支持自定义域名（在 Pages 设置中添加）。
+报告使用 Tailwind CDN + lightweight-charts CDN，其余全部内嵌，可本地打开或自行部署 `index.html`。

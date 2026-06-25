@@ -495,8 +495,8 @@ def _render_html(payload: dict, output_path: Path) -> None:
 
     payload_json = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
 
-    html = template_html.replace("__MINVEST_DATA__", payload_json)
-    html = html.replace("__MINVEST_SCRIPT__", script_js)
+    html = template_html.replace("__REPORT_DATA__", payload_json)
+    html = html.replace("__REPORT_SCRIPT__", script_js)
 
     output_path.write_text(html, encoding="utf-8")
 
