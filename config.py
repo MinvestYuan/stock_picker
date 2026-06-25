@@ -8,7 +8,7 @@ from __future__ import annotations
 
 # ==================== IB Gateway 连接 ====================
 IB_HOST = "127.0.0.1"
-IB_PORT = 4001
+IB_PORT = 4002
 IB_CLIENT_ID = 17
 IB_NUM_CONNECTIONS = 4
 IB_PAUSE_SECONDS = 0.25

@@ -7,6 +7,9 @@ lxml>=4.9.0
 pyarrow>=14.0.0
 pandas_market_calendars>=4.0.0
 
+# 测试
+pytest>=8.0.0
+
 # ib_async：ib_insync 的活跃维护继任者（API 兼容）
 # pandas_market_calendars：美股交易日历（下一个交易日计算）
 # 价格 OHLC → Parquet（cache/price_cache_*.parquet）；NPORT/ticker → SQLite

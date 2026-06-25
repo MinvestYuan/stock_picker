@@ -44,7 +44,8 @@ def score_universe(
         row = frame.iloc[-1]
 
         required = ["close", "ema50", "rs_ratio", "rs_momentum", momentum_col]
-        if any(pd.isna(row[col]) for col in required):
+        # 缺列（KeyError）或值为 NaN 都视为数据不全，跳过该股票而非崩溃
+        if any(col not in row.index or pd.isna(row[col]) for col in required):
             continue
 
         # 移除了 50 日均线硬性过滤（按用户要求）
