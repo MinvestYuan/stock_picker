@@ -184,7 +184,7 @@ def _fetch_bars(ib: IB, ticker: str, end_date_str: str, duration_str: str) -> li
     """底层 IB 请求"""
     contract = Stock(ticker, "SMART", "USD")
     qualified = ib.qualifyContracts(contract)
-    if not qualified:
+    if not qualified or qualified[0] is None:
         logger.warning("could not qualify %s", ticker)
         return None
     bars = ib.reqHistoricalData(
@@ -277,19 +277,22 @@ def _fetch_on_connection(
         return local_results
     try:
         for _idx, (ticker, duration_str, is_incremental, last_date) in enumerate(tickers_info, 1):
-            bars = _fetch_bars(ib, ticker, end_date_str, duration_str)
-            new_series = _bars_to_series(bars, ticker)
+            try:
+                bars = _fetch_bars(ib, ticker, end_date_str, duration_str)
+                new_series = _bars_to_series(bars, ticker)
 
-            if new_series is not None and not new_series.empty:
-                existing = existing_price_map.get(ticker)
-                if existing is None or existing.empty or not is_incremental:
-                    local_results[ticker] = new_series
-                else:
-                    new_series = new_series[new_series.index > last_date]
-                    if not new_series.empty:
-                        combined = pd.concat([existing, new_series])
-                        combined = combined[~combined.index.duplicated(keep="last")].sort_index()
-                        local_results[ticker] = combined
+                if new_series is not None and not new_series.empty:
+                    existing = existing_price_map.get(ticker)
+                    if existing is None or existing.empty or not is_incremental:
+                        local_results[ticker] = new_series
+                    else:
+                        new_series = new_series[new_series.index > last_date]
+                        if not new_series.empty:
+                            combined = pd.concat([existing, new_series])
+                            combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+                            local_results[ticker] = combined
+            except Exception as e:
+                logger.warning("[c%s] %s 价格获取失败，跳过: %s", client_id, ticker, e)
 
             if pause_seconds > 0:
                 time.sleep(pause_seconds)
@@ -370,19 +373,22 @@ def fetch_or_update_history(
         try:
             with ProgressBar(len(to_process), "IB 拉取价格", unit="股") as bar:
                 for _idx, (ticker, duration_str, is_incremental, last_date) in enumerate(to_process, start=1):
-                    bars = _fetch_bars(ib, ticker, end_date_str, duration_str)
-                    new_series = _bars_to_series(bars, ticker)
+                    try:
+                        bars = _fetch_bars(ib, ticker, end_date_str, duration_str)
+                        new_series = _bars_to_series(bars, ticker)
 
-                    if new_series is not None and not new_series.empty:
-                        existing = results.get(ticker)
-                        if existing is None or existing.empty or not is_incremental:
-                            results[ticker] = new_series
-                        else:
-                            new_series = new_series[new_series.index > last_date]
-                            if not new_series.empty:
-                                combined = pd.concat([existing, new_series])
-                                combined = combined[~combined.index.duplicated(keep="last")].sort_index()
-                                results[ticker] = combined
+                        if new_series is not None and not new_series.empty:
+                            existing = results.get(ticker)
+                            if existing is None or existing.empty or not is_incremental:
+                                results[ticker] = new_series
+                            else:
+                                new_series = new_series[new_series.index > last_date]
+                                if not new_series.empty:
+                                    combined = pd.concat([existing, new_series])
+                                    combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+                                    results[ticker] = combined
+                    except Exception as e:
+                        logger.warning("%s 价格获取失败，跳过: %s", ticker, e)
 
                     if pause_seconds > 0:
                         time.sleep(pause_seconds)

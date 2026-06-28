@@ -25,6 +25,10 @@ def setup_logging(level: int = logging.INFO) -> None:
         root.removeHandler(h)
     root.addHandler(handler)
     root.setLevel(level)
+
+    # 屏蔽 ib_async 的 position/portfolio 等 INFO 日志
+    logging.getLogger("ib_async").setLevel(logging.WARNING)
+
     _CONFIGURED = True
 
 
