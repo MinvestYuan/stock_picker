@@ -326,6 +326,16 @@ def ticker_save_unified_cache(cache: Dict[str, dict]) -> None:
         )
 
 
+def get_symbol_conid_map() -> Dict[str, int]:
+    """返回 {SYMBOL: conId} 映射，用于价格获取时直接指定合约 ID，绕过 SMART 路由歧义。"""
+    cache = ticker_load_unified_cache()
+    return {
+        v["ticker"].upper(): int(v["conId"])
+        for v in cache.values()
+        if v.get("ticker") and v.get("conId")
+    }
+
+
 def ticker_clear_resolution_caches() -> None:
     """清空 ticker 解析缓存（unified），保留 NPORT 与价格数据。"""
     init_db()

@@ -30,6 +30,7 @@ from data.data_fetcher import (
     price_cache_exists,
     save_price_cache,
 )
+from data.storage import get_symbol_conid_map
 from data.nport_data import get_latest_universe, get_monthly_universes, sync_holdings_if_needed
 from report.builder import add_benchmark_returns, compute_next_signals, generate_backtest_html
 from strategy.risk_overlay import is_qqq_bear_market
@@ -73,6 +74,8 @@ def _load_or_update_prices(tickers: list[str], benchmark: str) -> dict:
     else:
         logger.info("本地尚无价格缓存，将从 IB 全量拉取")
 
+    con_id_map = get_symbol_conid_map()
+
     ib = None
     if IB_NUM_CONNECTIONS <= 1:
         ib = connect_ib(IB_HOST, IB_PORT, IB_CLIENT_ID)
@@ -88,6 +91,7 @@ def _load_or_update_prices(tickers: list[str], benchmark: str) -> dict:
             port=IB_PORT,
             client_id=IB_CLIENT_ID,
             num_connections=IB_NUM_CONNECTIONS,
+            con_id_map=con_id_map,
         )
         save_price_cache(price_map, cache_file, benchmark)
     finally:

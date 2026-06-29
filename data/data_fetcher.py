@@ -7,7 +7,7 @@ from typing import Dict, Sequence, Tuple
 import asyncio
 
 import pandas as pd
-from ib_async import IB, Stock, util
+from ib_async import IB, Contract, Stock, util
 
 from config import (
     DEFAULT_BENCHMARK,
@@ -180,9 +180,12 @@ def _get_latest_trading_day(reference: pd.Timestamp | None = None) -> pd.Timesta
         return (day - pd.offsets.BDay(1)).normalize()
 
 
-def _fetch_bars(ib: IB, ticker: str, end_date_str: str, duration_str: str) -> list | None:
+def _fetch_bars(ib: IB, ticker: str, end_date_str: str, duration_str: str, con_id: int | None = None) -> list | None:
     """底层 IB 请求"""
-    contract = Stock(ticker, "SMART", "USD")
+    if con_id:
+        contract = Contract(conId=con_id, exchange="SMART")
+    else:
+        contract = Stock(ticker, "SMART", "USD")
     qualified = ib.qualifyContracts(contract)
     if not qualified or qualified[0] is None:
         logger.warning("could not qualify %s", ticker)
@@ -255,6 +258,7 @@ def _fetch_on_connection(
     pause_seconds: float,
     existing_price_map: Dict[str, pd.Series],
     progress: ProgressBar | None = None,
+    con_id_map: Dict[str, int] | None = None,
 ) -> Dict[str, pd.Series]:
     """在一个独立的 IB 连接（clientId）上顺序处理一批 ticker，返回该批的更新结果。"""
     # ib_async uses asyncio internally; ensure an event loop exists in this worker thread
@@ -278,7 +282,7 @@ def _fetch_on_connection(
     try:
         for _idx, (ticker, duration_str, is_incremental, last_date) in enumerate(tickers_info, 1):
             try:
-                bars = _fetch_bars(ib, ticker, end_date_str, duration_str)
+                bars = _fetch_bars(ib, ticker, end_date_str, duration_str, (con_id_map or {}).get(ticker.upper()))
                 new_series = _bars_to_series(bars, ticker)
 
                 if new_series is not None and not new_series.empty:
@@ -315,6 +319,7 @@ def fetch_or_update_history(
     port: int = 4002,
     client_id: int = 17,
     num_connections: int = 4,
+    con_id_map: Dict[str, int] | None = None,
 ) -> Dict[str, pd.Series]:
     """核心增量更新函数（首次全量，后续仅更新缺失部分）。
 
@@ -374,7 +379,7 @@ def fetch_or_update_history(
             with ProgressBar(len(to_process), "IB 拉取价格", unit="股") as bar:
                 for _idx, (ticker, duration_str, is_incremental, last_date) in enumerate(to_process, start=1):
                     try:
-                        bars = _fetch_bars(ib, ticker, end_date_str, duration_str)
+                        bars = _fetch_bars(ib, ticker, end_date_str, duration_str, (con_id_map or {}).get(ticker.upper()))
                         new_series = _bars_to_series(bars, ticker)
 
                         if new_series is not None and not new_series.empty:
@@ -417,6 +422,7 @@ def fetch_or_update_history(
                         pause_seconds,
                         results,
                         bar,
+                        con_id_map,
                     )
                     futures.append((c_id, fut))
 
