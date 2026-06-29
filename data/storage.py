@@ -336,6 +336,24 @@ def get_symbol_conid_map() -> Dict[str, int]:
     }
 
 
+def ticker_update_conid_for_symbol(symbol: str, con_id: int, extra: dict | None = None) -> bool:
+    """将 unified 缓存中匹配 symbol 的条目的 conId 更新为新值（拆股/合并后 conId 失效时使用）。"""
+    symbol = symbol.upper()
+    cache = ticker_load_unified_cache()
+    updated = False
+    for entry in cache.values():
+        if (entry.get("ticker") or "").upper() == symbol:
+            entry["conId"] = con_id
+            entry["resolved_at"] = _now_iso()
+            if extra:
+                entry.update({k: v for k, v in extra.items() if v})
+            updated = True
+    if updated:
+        ticker_save_unified_cache(cache)
+        logger.info("已更新 ticker 缓存 %s → conId %d", symbol, con_id)
+    return updated
+
+
 def ticker_clear_resolution_caches() -> None:
     """清空 ticker 解析缓存（unified），保留 NPORT 与价格数据。"""
     init_db()

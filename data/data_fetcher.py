@@ -1,4 +1,5 @@
 from __future__ import annotations
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -30,11 +31,13 @@ from .storage import (
     price_cache_mtime,
     price_parquet_path,
     save_price_map,
+    ticker_update_conid_for_symbol,
 )
 
 logger = get_logger(__name__)
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+_conid_cache_lock = threading.Lock()
 
 
 # ==================== 持久化 + 增量更新价格缓存（Parquet） ====================
@@ -180,25 +183,109 @@ def _get_latest_trading_day(reference: pd.Timestamp | None = None) -> pd.Timesta
         return (day - pd.offsets.BDay(1)).normalize()
 
 
-def _fetch_bars(ib: IB, ticker: str, end_date_str: str, duration_str: str, con_id: int | None = None) -> list | None:
-    """底层 IB 请求"""
+def _request_historical(
+    ib: IB,
+    contract,
+    end_date_str: str,
+    duration_str: str,
+) -> tuple[list | None, bool]:
+    """请求历史 K 线，返回 (bars, unknown_contract)。unknown_contract 为 True 表示 162 错误。"""
+    unknown_contract = [False]
+
+    def on_error(req_id, error_code, error_string, _contract):
+        if error_code == 162 and "Unknown contract" in (error_string or ""):
+            unknown_contract[0] = True
+
+    ib.errorEvent += on_error
+    try:
+        bars = ib.reqHistoricalData(
+            contract,
+            endDateTime=end_date_str,
+            durationStr=duration_str,
+            barSizeSetting="1 day",
+            whatToShow="TRADES",
+            useRTH=True,
+            formatDate=1,
+        )
+    finally:
+        ib.errorEvent -= on_error
+
+    if unknown_contract[0]:
+        return None, True
+    return bars, False
+
+
+def _refresh_conid_cache(ticker: str, contract, con_id_map: Dict[str, int] | None) -> None:
+    sym = ticker.upper()
+    new_con_id = int(contract.conId)
+    if con_id_map is not None:
+        con_id_map[sym] = new_con_id
+    extra = {
+        "primaryExchange": getattr(contract, "primaryExchange", "") or "",
+        "currency": getattr(contract, "currency", "USD") or "USD",
+        "secType": getattr(contract, "secType", "STK") or "STK",
+        "exchange": getattr(contract, "exchange", "") or "",
+    }
+    with _conid_cache_lock:
+        ticker_update_conid_for_symbol(sym, new_con_id, extra=extra)
+
+
+def _fetch_bars(
+    ib: IB,
+    ticker: str,
+    end_date_str: str,
+    duration_str: str,
+    con_id: int | None = None,
+    con_id_map: Dict[str, int] | None = None,
+) -> list | None:
+    """底层 IB 请求。缓存 conId 失效（162 Unknown contract / HON.OLD 等）时按 symbol 重新 qualify 并更新缓存。"""
+    ticker_upper = ticker.upper()
+    stale_con_id = con_id
+
     if con_id:
         contract = Contract(conId=con_id, exchange="SMART")
-    else:
-        contract = Stock(ticker, "SMART", "USD")
+        qualified = ib.qualifyContracts(contract)
+        if qualified and qualified[0] is not None:
+            qc = qualified[0]
+            sym = (qc.symbol or "").upper()
+            if sym == ticker_upper and ".OLD" not in sym:
+                bars, unknown = _request_historical(ib, qc, end_date_str, duration_str)
+                if not unknown:
+                    return bars
+                logger.warning(
+                    "%s cached conId %s: Unknown contract (162), re-qualifying by symbol",
+                    ticker,
+                    con_id,
+                )
+            else:
+                logger.warning(
+                    "%s cached conId %s resolved to stale %s, re-qualifying by symbol",
+                    ticker,
+                    con_id,
+                    qc.symbol,
+                )
+        else:
+            logger.warning(
+                "%s cached conId %s could not qualify, re-qualifying by symbol",
+                ticker,
+                con_id,
+            )
+
+    contract = Stock(ticker, "SMART", "USD")
     qualified = ib.qualifyContracts(contract)
     if not qualified or qualified[0] is None:
         logger.warning("could not qualify %s", ticker)
         return None
-    bars = ib.reqHistoricalData(
-        qualified[0],
-        endDateTime=end_date_str,
-        durationStr=duration_str,
-        barSizeSetting="1 day",
-        whatToShow="TRADES",
-        useRTH=True,
-        formatDate=1,
-    )
+
+    qc = qualified[0]
+    bars, unknown = _request_historical(ib, qc, end_date_str, duration_str)
+    if unknown:
+        logger.warning("%s: Unknown contract (162) after symbol qualify, skipping", ticker)
+        return None
+
+    if stale_con_id and qc.conId and int(qc.conId) != int(stale_con_id):
+        _refresh_conid_cache(ticker, qc, con_id_map)
+
     return bars
 
 
@@ -282,7 +369,14 @@ def _fetch_on_connection(
     try:
         for _idx, (ticker, duration_str, is_incremental, last_date) in enumerate(tickers_info, 1):
             try:
-                bars = _fetch_bars(ib, ticker, end_date_str, duration_str, (con_id_map or {}).get(ticker.upper()))
+                bars = _fetch_bars(
+                    ib,
+                    ticker,
+                    end_date_str,
+                    duration_str,
+                    (con_id_map or {}).get(ticker.upper()),
+                    con_id_map,
+                )
                 new_series = _bars_to_series(bars, ticker)
 
                 if new_series is not None and not new_series.empty:
@@ -379,7 +473,14 @@ def fetch_or_update_history(
             with ProgressBar(len(to_process), "IB 拉取价格", unit="股") as bar:
                 for _idx, (ticker, duration_str, is_incremental, last_date) in enumerate(to_process, start=1):
                     try:
-                        bars = _fetch_bars(ib, ticker, end_date_str, duration_str, (con_id_map or {}).get(ticker.upper()))
+                        bars = _fetch_bars(
+                            ib,
+                            ticker,
+                            end_date_str,
+                            duration_str,
+                            (con_id_map or {}).get(ticker.upper()),
+                            con_id_map,
+                        )
                         new_series = _bars_to_series(bars, ticker)
 
                         if new_series is not None and not new_series.empty:
