@@ -82,10 +82,14 @@ def test_calculate_metrics_all_positive():
     assert m["profit_factor"] == 99.99
 
 
-def test_calculate_metrics_one_negative_no_sortino():
-    """边界：只有 1 个负收益（<2），下行偏差不足，sortino 应为 0。"""
-    m = _calculate_metrics(pd.Series([0.05, 0.03, -0.02, 0.04]))
-    assert m["sortino"] == 0.0  # 负收益样本 < 2
+def test_calculate_metrics_one_negative_sortino():
+    """标准 Sortino：仅 1 个负月也应用 sqrt(mean(min(0,r)²))×√12。"""
+    returns = pd.Series([0.05, 0.03, -0.02, 0.04])
+    m = _calculate_metrics(returns)
+    downside = np.sqrt((np.minimum(returns, 0) ** 2).mean()) * np.sqrt(12)
+    ann_mean = returns.mean() * 12
+    expected = ann_mean / downside
+    assert abs(m["sortino"] - expected) < 1e-9
 
 
 def test_drawdown_from_cumulative():
@@ -111,6 +115,6 @@ if __name__ == "__main__":
     test_calculate_metrics_zero_volatility()
     test_calculate_metrics_all_negative()
     test_calculate_metrics_all_positive()
-    test_calculate_metrics_one_negative_no_sortino()
+    test_calculate_metrics_one_negative_sortino()
     test_drawdown_from_cumulative()
     print("ok - report/builder metrics")

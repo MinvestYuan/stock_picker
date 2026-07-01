@@ -47,7 +47,11 @@ def is_qqq_bear_market(
 ) -> bool:
     """QQQ 50EMA < 200EMA 时为 True，策略应持现金。"""
     if overlay_ticker not in price_map:
-        return False
+        logger.warning(
+            "熊市保护：%s 价格数据缺失，保守按持现金处理",
+            overlay_ticker,
+        )
+        return True
     ema_fast, ema_slow = _get_emas(price_map[overlay_ticker])
     try:
         fast = float(ema_fast.loc[:asof_date].iloc[-1])

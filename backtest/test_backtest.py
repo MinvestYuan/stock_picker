@@ -62,7 +62,7 @@ def _qqq_bear(dates: pd.DatetimeIndex) -> pd.DataFrame:
 
 
 def test_backtest_basic_return_and_cost():
-    """基础：单股每月 +10%，验证收益扣除双边交易成本。"""
+    """基础：单股连续两月 +10%，仅首月买入、末月平仓各扣一次单边成本。"""
     dates = _trading_calendar()
     price_map = {
         "AAA": _make_ohlc(dates, [100, 100, 100, 100, 100, 100, 110, 110, 110, 121, 121, 121]),
@@ -81,10 +81,10 @@ def test_backtest_basic_return_and_cost():
         cost_per_trade=cost,
     )
     assert not df_summary.empty
-    # 2026-01：买入日 01-02 开盘 100，卖出日 02-02 开盘 110 → 毛收益 0.10
     jan = df_summary[df_summary["month"] == "2026-01"].iloc[0]
-    expected_net = 0.10 - 2 * cost
-    assert abs(jan["monthly_return"] - expected_net) < 1e-9, jan["monthly_return"]
+    feb = df_summary[df_summary["month"] == "2026-02"].iloc[0]
+    assert abs(jan["monthly_return"] - (0.10 - cost)) < 1e-9, jan["monthly_return"]
+    assert abs(feb["monthly_return"] - (0.10 - cost)) < 1e-9, feb["monthly_return"]
 
 
 def test_backtest_bear_market_holds_cash():
@@ -167,6 +167,49 @@ def test_backtest_missing_benchmark_raises():
         pass
 
 
+def test_backtest_bear_exit_charges_turnover_cost():
+    """熊市清仓：由持仓切入熊市时扣减换出单边成本。"""
+    from unittest.mock import patch
+
+    dates = _trading_calendar()
+    price_map = {
+        "AAA": _make_ohlc(dates, [100, 100, 100, 100, 100, 100, 110, 110, 110, 121, 121, 121]),
+        "QQQ": _qqq_bull(dates),
+    }
+    features = _bullish_features(dates, ["AAA"])
+    cost = 0.001
+
+    calls = [0]
+
+    def bear_from_second_month(price_map, asof_date, overlay_ticker="QQQ"):
+        calls[0] += 1
+        return calls[0] >= 2
+
+    with patch("backtest.tester.is_qqq_bear_market", side_effect=bear_from_second_month):
+        df_summary, _ = backtest_nport_monthly(
+            price_map=price_map,
+            features=features,
+            monthly_universes={"2026-01": ["AAA"], "2026-02": ["AAA"]},
+            benchmark_ticker="QQQ",
+            top_n=1,
+            cost_per_trade=cost,
+        )
+
+    jan = df_summary[df_summary["month"] == "2026-01"].iloc[0]
+    feb = df_summary[df_summary["month"] == "2026-02"].iloc[0]
+    assert abs(jan["monthly_return"] - (0.10 - cost)) < 1e-9
+    assert abs(feb["monthly_return"] + cost) < 1e-9
+
+
+def test_qqq_missing_data_conservative_cash():
+    """QQQ 数据缺失时保守持现金，与异常分支一致。"""
+    from strategy.risk_overlay import is_qqq_bear_market
+
+    dates = _trading_calendar()
+    price_map = {"IWM": _qqq_bull(dates)}
+    assert is_qqq_bear_market(price_map, dates[-1]) is True
+
+
 def test_backtest_cumulative_return_compounding():
     """验证累计收益为月度收益的复利。"""
     dates = _trading_calendar()
@@ -196,5 +239,7 @@ if __name__ == "__main__":
     test_backtest_survivorship_missing_price_as_cash()
     test_backtest_empty_universe()
     test_backtest_missing_benchmark_raises()
+    test_backtest_bear_exit_charges_turnover_cost()
+    test_qqq_missing_data_conservative_cash()
     test_backtest_cumulative_return_compounding()
     print("ok - backtest/tester")

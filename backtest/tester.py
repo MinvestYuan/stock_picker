@@ -81,7 +81,8 @@ def backtest_nport_monthly(
     - 买入日 = 当月首个交易日，买入价 = 当日开盘价
     - 卖出日 = 下月首个交易日，卖出价 = 当日开盘价
     - 月度收益 = 持仓股票 (卖出价 / 买入价 - 1) 的等权平均
-    - 交易成本：每笔单边 cost_per_trade（默认 0.1%），买卖各扣一次
+    - 交易成本：组合层面按换手率计费，仅对换入/换出的标的收取单边 cost_per_trade；
+      留仓不重复扣费；熊市清仓与回测末期平仓各计一次卖出成本
 
     选股与风控：
     - 去掉 EMA50 硬性过滤
@@ -99,6 +100,7 @@ def backtest_nport_monthly(
     # 幸存者偏差诊断：统计因无可交易价格而按现金计入的仓位占比
     total_pick_slots = 0
     total_missing_slots = 0
+    prev_holdings: set[str] = set()
 
     for month_str, universe in sorted(monthly_universes.items()):
         trade_dates = resolve_month_trade_dates(dates, month_str)
@@ -117,16 +119,17 @@ def backtest_nport_monthly(
             continue
 
         if is_qqq_bear_market(price_map, asof_date):
-            # 熊市，持现金
+            exit_drag = len(prev_holdings) * cost_per_trade / top_n if prev_holdings else 0.0
             summary_rows.append({
                 "month": month_str,
                 "asof_date": asof_date.date().isoformat(),
                 "buy_date": buy_date.date().isoformat(),
                 "sell_date": sell_date.date().isoformat(),
                 "num_stocks": 0,
-                "monthly_return": 0.0,
+                "monthly_return": -exit_drag,
                 "top_tickers": "CASH (QQQ 50MA < 200MA)",
             })
+            prev_holdings = set()
             continue
 
         ranked = score_universe(filtered_features, asof_date, momentum_col=momentum_col)
@@ -141,6 +144,7 @@ def backtest_nport_monthly(
         selected: List[str] = []
         top_picks_used = []
         month_missing = 0
+        pick_rows: List[dict] = []
 
         for p in ranked[:top_n]:
             ticker = p.ticker
@@ -156,12 +160,12 @@ def backtest_nport_monthly(
                     sell_price = None
 
             if buy_price is None or sell_price is None:
-                # 无可交易价格：该仓位计为现金（收益 0），并计数用于诊断
                 month_missing += 1
                 total_missing_slots += 1
                 rets.append(0.0)
                 selected.append(f"{ticker}(无价/现金)")
                 top_picks_used.append(p)
+                pick_rows.append({"has_price": False})
                 detail_rows.append({
                     "month": month_str,
                     "ticker": ticker,
@@ -178,9 +182,30 @@ def backtest_nport_monthly(
                 })
                 continue
 
-            # 扣除双边交易成本（买入滑点+佣金 + 卖出滑点+佣金）
             gross_ret = (sell_price / buy_price) - 1.0
-            ret = gross_ret - 2 * cost_per_trade
+            pick_rows.append({
+                "has_price": True,
+                "ticker": ticker,
+                "gross_ret": gross_ret,
+                "buy_price": buy_price,
+                "sell_price": sell_price,
+                "p": p,
+            })
+
+        new_holdings = {row["ticker"] for row in pick_rows if row.get("has_price")}
+        entering = new_holdings - prev_holdings
+        exiting = prev_holdings - new_holdings
+        exit_drag = len(exiting) * cost_per_trade / top_n
+
+        for row in pick_rows:
+            if not row.get("has_price"):
+                continue
+            ticker = row["ticker"]
+            gross_ret = row["gross_ret"]
+            p = row["p"]
+            buy_price = row["buy_price"]
+            sell_price = row["sell_price"]
+            ret = gross_ret - cost_per_trade if ticker in entering else gross_ret
             rets.append(ret)
             selected.append(ticker)
             top_picks_used.append(p)
@@ -210,7 +235,7 @@ def backtest_nport_monthly(
                 month_str, top_n, month_missing,
             )
 
-        monthly_ret = float(np.mean(rets))
+        monthly_ret = float(np.mean(rets)) - exit_drag
         summary_rows.append({
             "month": month_str,
             "asof_date": asof_date.date().isoformat(),
@@ -220,6 +245,7 @@ def backtest_nport_monthly(
             "monthly_return": monthly_ret,
             "top_tickers": ",".join(selected),
         })
+        prev_holdings = new_holdings
 
     if not summary_rows:
         logger.warning("没有找到可回测的月份")
@@ -227,6 +253,11 @@ def backtest_nport_monthly(
 
     df_summary = pd.DataFrame(summary_rows).sort_values("month").reset_index(drop=True)
     df_detail = pd.DataFrame(detail_rows)
+
+    if prev_holdings:
+        final_exit_drag = len(prev_holdings) * cost_per_trade / top_n
+        df_summary.iloc[-1, df_summary.columns.get_loc("monthly_return")] -= final_exit_drag
+        prev_holdings = set()
 
     df_summary["cumulative_return"] = (1 + df_summary["monthly_return"]).cumprod() - 1
 

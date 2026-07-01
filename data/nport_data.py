@@ -120,15 +120,18 @@ def fetch_iwb_filings_via_efts(start_date: str = BOOTSTRAP_START_DATE, end_date:
 
     filings: List[Dict] = []
     from_idx = 0
-    size = 100
+    page_size = 100
+    fetch_complete = False
+
     while True:
-        url = base_url if from_idx == 0 else f"{base_url}&from={from_idx}&size={size}"
+        # 每页都必须带 size；首请求缺 size 时 SEC 默认条数 < page_size，会误判为最后一页
+        url = f"{base_url}&from={from_idx}&size={page_size}"
         try:
             resp = requests.get(url, headers=HEADERS, timeout=30)
             resp.raise_for_status()
             data = resp.json()
         except Exception as e:
-            logger.warning("efts search 请求失败: %s", e)
+            logger.warning("efts search 请求失败 (from=%d): %s", from_idx, e)
             break
 
         hits = data.get("hits", {}).get("hits", [])
@@ -143,9 +146,10 @@ def fetch_iwb_filings_via_efts(start_date: str = BOOTSTRAP_START_DATE, end_date:
                 "reportDate": src.get("period_ending", ""),
             })
 
-        if len(hits) < size:
+        if len(hits) < page_size:
+            fetch_complete = True
             break
-        from_idx += size
+        from_idx += page_size
         time.sleep(REQUEST_DELAY)
 
     seen = set()
@@ -156,7 +160,12 @@ def fetch_iwb_filings_via_efts(start_date: str = BOOTSTRAP_START_DATE, end_date:
             unique.append(f)
 
     if want_full:
-        nport_save_efts_cache(unique)
+        if fetch_complete and unique:
+            nport_save_efts_cache(unique)
+        elif not fetch_complete:
+            logger.warning("efts 分页未完成，跳过写入缓存（当前 %d 条）", len(unique))
+        elif not unique:
+            logger.warning("efts 结果为空，跳过写入缓存")
 
     logger.info("全文搜索完成：命中 %d 个 IWB 申报 (range %s..%s)", len(unique), start_date, end_date)
     return unique

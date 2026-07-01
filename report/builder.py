@@ -122,12 +122,8 @@ def _calculate_metrics(returns: pd.Series) -> dict:
     ann_mean = rets.mean() * 12
     sharpe = ann_mean / volatility if volatility > 1e-12 else 0.0
 
-    negative_rets = rets[rets < 0]
-    if len(negative_rets) >= 2:
-        downside = negative_rets.std() * np.sqrt(12)
-        sortino = ann_mean / downside if downside > 1e-12 else 0.0
-    else:
-        sortino = 0.0
+    downside = np.sqrt((np.minimum(rets, 0) ** 2).mean()) * np.sqrt(12)
+    sortino = ann_mean / downside if downside > 1e-12 else 0.0
 
     worst_monthly_return = rets.min()
 
