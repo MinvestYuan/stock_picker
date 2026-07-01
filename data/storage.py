@@ -172,6 +172,15 @@ def load_price_map(benchmark: str) -> Dict[str, pd.DataFrame]:
     return result
 
 
+def prune_price_map(price_map: Dict[str, pd.DataFrame], allowed_tickers: list[str]) -> list[str]:
+    """移除 price_map 中不在 allowed_tickers 内的条目，返回被删 ticker 列表。"""
+    allowed = set(allowed_tickers)
+    removed = sorted(k for k in list(price_map) if k not in allowed)
+    for k in removed:
+        del price_map[k]
+    return removed
+
+
 def save_price_map(benchmark: str, price_map: Dict[str, pd.DataFrame]) -> None:
     if not price_map:
         return

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import weakref
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -26,16 +27,18 @@ def resolve_month_trade_dates(dates: pd.DatetimeIndex, month_str: str) -> tuple[
 
 
 # 缓存规整后的 OHLC（按对象 id + 长度），避免 open_at 每次调用都
-# copy + to_datetime + sort_index。对于已规整且升序的索引（缓存加载的
-# 价格即如此），直接复用原对象，不额外占内存。
-_NORM_CACHE: dict[tuple[int, int], pd.DataFrame] = {}
+# copy + to_datetime + sort_index。weakref 守卫确保源对象 GC 后失效。
+_NORM_CACHE: dict[tuple[int, int], tuple[weakref.ref, pd.DataFrame]] = {}
 
 
 def _normalize_ohlc(pseries: pd.DataFrame) -> pd.DataFrame:
     cache_key = (id(pseries), len(pseries))
-    cached = _NORM_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
+    entry = _NORM_CACHE.get(cache_key)
+    if entry is not None:
+        obj_ref, cached = entry
+        if obj_ref() is pseries:
+            return cached
+        _NORM_CACHE.pop(cache_key, None)
     idx = pseries.index
     if isinstance(idx, pd.DatetimeIndex) and idx.is_monotonic_increasing and idx.equals(idx.normalize()):
         out = pseries
@@ -43,7 +46,7 @@ def _normalize_ohlc(pseries: pd.DataFrame) -> pd.DataFrame:
         out = pseries.copy()
         out.index = pd.to_datetime(out.index).normalize()
         out = out.sort_index()
-    _NORM_CACHE[cache_key] = out
+    _NORM_CACHE[cache_key] = (weakref.ref(pseries), out)
     return out
 
 

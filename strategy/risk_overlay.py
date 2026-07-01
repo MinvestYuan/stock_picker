@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import weakref
 from typing import Dict
 
 import pandas as pd
@@ -16,9 +17,9 @@ from utils.logconf import get_logger
 logger = get_logger(__name__)
 
 # 缓存：按 overlay 价格对象的 id + 长度 缓存 (fast_ema, slow_ema)，
-# 避免回测中每个月都对整条序列重算 EMA50/200。键用稳定的 price_map[ticker]
-# 对象（同一次运行内 id 不变），而非每次访问都新建的 df["close"]。
-_EMA_CACHE: dict[tuple[int, int], tuple[pd.Series, pd.Series]] = {}
+# 避免回测中每个月都对整条序列重算 EMA50/200。weakref 守卫确保源对象 GC
+# 后条目失效，避免 id 复用读到陈旧 EMA。
+_EMA_CACHE: dict[tuple[int, int], tuple[weakref.ref, tuple[pd.Series, pd.Series]]] = {}
 
 
 def _extract_close(ohlc_or_series: pd.DataFrame | pd.Series) -> pd.Series:
@@ -30,14 +31,18 @@ def _extract_close(ohlc_or_series: pd.DataFrame | pd.Series) -> pd.Series:
 def _get_emas(overlay_obj: pd.DataFrame | pd.Series) -> tuple[pd.Series, pd.Series]:
     """返回 (ema_fast, ema_slow)，对同一个 overlay 价格对象只计算一次。"""
     cache_key = (id(overlay_obj), len(overlay_obj))
-    cached = _EMA_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
+    entry = _EMA_CACHE.get(cache_key)
+    if entry is not None:
+        obj_ref, cached = entry
+        if obj_ref() is overlay_obj:
+            return cached
+        _EMA_CACHE.pop(cache_key, None)
     close = _extract_close(overlay_obj)
     ema_fast = close.ewm(span=FAST_EMA_SPAN, adjust=False).mean()
     ema_slow = close.ewm(span=SLOW_EMA_SPAN, adjust=False).mean()
-    _EMA_CACHE[cache_key] = (ema_fast, ema_slow)
-    return ema_fast, ema_slow
+    result = (ema_fast, ema_slow)
+    _EMA_CACHE[cache_key] = (weakref.ref(overlay_obj), result)
+    return result
 
 
 def is_qqq_bear_market(

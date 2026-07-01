@@ -4,7 +4,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Sequence, Tuple
+from typing import Dict, Optional, Sequence, Tuple
 import asyncio
 
 import pandas as pd
@@ -30,6 +30,7 @@ from .storage import (
     price_cache_exists,
     price_cache_mtime,
     price_parquet_path,
+    prune_price_map,
     save_price_map,
     ticker_update_conid_for_symbol,
 )
@@ -359,10 +360,8 @@ def _fetch_on_connection(
             asyncio.set_event_loop(loop)
     ib = None
     local_results: Dict[str, pd.Series] = {}
-    try:
-        ib = connect_ib(host, port, client_id)
-    except Exception as e:
-        logger.warning("[c%s] IB 连接失败: %s", client_id, e)
+    ib = connect_ib(host, port, client_id)
+    if ib is None:
         if progress is not None:
             progress.update(len(tickers_info))
         return local_results
@@ -469,6 +468,9 @@ def fetch_or_update_history(
         if own_connection:
             logger.info("连接 IB Gateway (%s:%s, clientId=%s)...", host, port, client_id)
             ib = connect_ib(host, port, client_id)
+            if ib is None:
+                logger.warning("IB 连接失败，使用现有缓存（%d 只股票）", len(results))
+                return results
         try:
             with ProgressBar(len(to_process), "IB 拉取价格", unit="股") as bar:
                 for _idx, (ticker, duration_str, is_incremental, last_date) in enumerate(to_process, start=1):
@@ -538,14 +540,25 @@ def fetch_or_update_history(
                 if failed:
                     logger.warning("%d/%d 个并行连接失败", failed, len(futures))
 
+    removed = prune_price_map(results, list(tickers))
+    if removed:
+        logger.info(
+            "已移除 %d 只超出回测范围的价格数据: %s",
+            len(removed), ", ".join(removed),
+        )
+
     logger.info("价格数据更新完成，共 %d 只股票", len(results))
     return results
 
 
-def connect_ib(host: str = IB_HOST, port: int = IB_PORT, client_id: int = IB_CLIENT_ID) -> IB:
+def connect_ib(host: str = IB_HOST, port: int = IB_PORT, client_id: int = IB_CLIENT_ID) -> Optional[IB]:
     ib = IB()
-    ib.connect(host, port, clientId=client_id, readonly=True)
-    return ib
+    try:
+        ib.connect(host, port, clientId=client_id, readonly=True, timeout=10)
+        return ib
+    except Exception as e:
+        logger.warning("连接 IB (%s:%s clientId=%s) 失败: %s", host, port, client_id, e)
+        return None
 
 
 def prepare_feature_frame(ohlc: pd.DataFrame, benchmark: pd.Series) -> pd.DataFrame:
