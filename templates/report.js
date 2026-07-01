@@ -99,7 +99,7 @@ function renderMonthlyCards() {
                 </tr>`;
             }).join('');
             tableHtml = `<table>
-                <thead><tr><th>标的</th><th>买入价格</th><th>卖出价</th><th>回报</th></tr></thead>
+                <thead><tr><th>标的</th><th>买入价</th><th>卖出价</th><th>回报</th></tr></thead>
                 <tbody>${rows}</tbody>
             </table>`;
         } else {
