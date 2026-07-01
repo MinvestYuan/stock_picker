@@ -231,17 +231,21 @@ def _build_drawdown_series(
     return series
 
 
-def _build_dd_distribution(drawdown: pd.Series) -> list:
-    dd_negative = [float(d) for d in drawdown if d < 0]
-    if not dd_negative:
+def _build_return_distribution(monthly_returns: pd.Series) -> list:
+    rets = [float(r) for r in monthly_returns if pd.notna(r)]
+    if not rets:
         return []
-    min_d = min(dd_negative)
-    bin_edges = np.arange(0, min_d - 0.001, -0.05)[::-1]
+    min_r, max_r = min(rets), max(rets)
+    bin_width = 0.05
+    low = np.floor(min_r / bin_width) * bin_width
+    high = np.ceil(max_r / bin_width) * bin_width
+    if high <= low:
+        high = low + bin_width
+    bin_edges = np.arange(low, high + bin_width * 0.5, bin_width)
     if len(bin_edges) < 3:
-        # 回撤很小时退化为 6 个等距 bin；必须升序（min_d < 0），否则
-        # np.histogram 会因 bins 非单调递增报错。
-        bin_edges = np.linspace(min_d, 0, 6)
-    counts, edges = np.histogram(dd_negative, bins=bin_edges)
+        pad = bin_width / 2
+        bin_edges = np.linspace(min_r - pad, max_r + pad, 6)
+    counts, edges = np.histogram(rets, bins=bin_edges)
     bin_centers = (edges[:-1] + edges[1:]) / 2
     return [
         {"time": round(c * 10000) + 100000, "value": int(cnt)}
@@ -570,7 +574,7 @@ def generate_backtest_html(
         {"time": f"{row['month']}-01", "value": round(float(row["monthly_return"]), 6)}
         for _, row in df_summary.iterrows()
     ]
-    tv_dd_dist_data = _build_dd_distribution(drawdown)
+    tv_return_dist_data = _build_return_distribution(df_summary["monthly_return"])
 
     top5_tickers, buy_date, sell_date = _resolve_latest_k_window(
         df_summary, df_detail, current_month_picks, current_month_buy_date,
@@ -621,7 +625,7 @@ def generate_backtest_html(
         "tv_equity_series": tv_equity_series,
         "tv_drawdown_series": tv_drawdown_series,
         "tv_monthly_data": tv_monthly_data,
-        "tv_dd_dist_data": tv_dd_dist_data,
+        "tv_return_dist_data": tv_return_dist_data,
         "latest_k_metadata": latest_k_metadata,
         "latest_k_fallback": latest_k_fallback,
     }

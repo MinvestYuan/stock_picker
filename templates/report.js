@@ -6,7 +6,7 @@ const tvEquityData = DATA.tv_equity_series;
 const chartColors = DATA.colors_map;
 const tvDrawdownSeries = DATA.tv_drawdown_series;
 const tvMonthlyData = DATA.tv_monthly_data;
-const tvDDDistData = DATA.tv_dd_dist_data;
+const tvReturnDistData = DATA.tv_return_dist_data;
 const latestKMetadata = DATA.latest_k_metadata;
 const latestKFallback = DATA.latest_k_fallback;
 const mtdReturnsReport = DATA.mtd_returns;
@@ -255,11 +255,16 @@ function initTradingViewMonthly() {
     initHistogramChart('tv-monthly-chart', coloredData, { title: '策略月度回报', errorMsg: '月度回报图表创建出错，请刷新。' });
 }
 
-function initTradingViewDDDist() {
-    initHistogramChart('tv-dd-dist-chart', tvDDDistData, {
-        title: '回撤分布', color: '#e11d48',
+function initTradingViewReturnDist() {
+    const coloredData = tvReturnDistData.map(d => ({
+        time: d.time,
+        value: d.value,
+        color: ((d.time - 100000) / 100) >= 0 ? '#059669' : '#e11d48',
+    }));
+    initHistogramChart('tv-return-dist-chart', coloredData, {
+        title: '回报分布',
         chartOpts: { timeScale: { ...TV_BASE.timeScale, tickMarkFormatter: (time) => ((time - 100000) / 100).toFixed(1) + '%' } },
-        errorMsg: '回撤分布图表出错。',
+        errorMsg: '回报分布图表出错。',
     });
 }
 
@@ -353,7 +358,7 @@ function initializeAll() {
     setTimeout(initTradingViewEquity, 120);
     setTimeout(initTradingViewDrawdown, 150);
     setTimeout(initTradingViewMonthly, 150);
-    setTimeout(initTradingViewDDDist, 180);
+    setTimeout(initTradingViewReturnDist, 180);
     setTimeout(initLatestKChart, 150);
 }
 
